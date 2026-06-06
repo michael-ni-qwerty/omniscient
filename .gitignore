@@ -1,0 +1,98 @@
+# ============================================================
+# Omniscient — root .gitignore (Rust · Solidity/Foundry · TS · Python)
+# ============================================================
+.devin/*
+!.devin/rules/*
+# ---------- Secrets / env (NEVER commit) ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+secrets/
+.secrets/
+# Foundry keystore / wallet material
+.foundry/keystores/
+# Mnemonics / private keys accidentally dumped
+*.mnemonic
+
+# ---------- Rust ----------
+/target/
+**/target/
+debug/
+*.pdb
+# rust-analyzer / rustc incremental artifacts
+**/*.rs.bk
+
+# ---------- Solidity / Foundry ----------
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/dry-run/
+# keep deployment broadcasts but drop noisy run-latest duplicates if desired:
+# contracts/broadcast/**/run-*.json
+out/
+cache/
+# Hardhat (if ever used alongside Foundry)
+artifacts/
+typechain/
+typechain-types/
+.openzeppelin/
+
+# ---------- Node / TypeScript (dApp) ----------
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+.turbo/
+coverage/
+*.tsbuildinfo
+.eslintcache
+.pnp.*
+.yarn/cache
+.yarn/install-state.gz
+
+# ---------- Python (tooling / scripts) ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env.venv
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# ---------- Databases / local infra ----------
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+redpanda-data/
+docker-volumes/
+
+# ---------- Logs / runtime ----------
+*.log
+logs/
+*.pid
+*.seed
+*.out
+
+# ---------- OS / Editor cruft ----------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+
+# ---------- VS Code: keep shared config, drop personal ----------
+.vscode/*
+.history/
+
+# ---------- Misc build / coverage ----------
+lcov.info
+*.gcda
+*.gcno
