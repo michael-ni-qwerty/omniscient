@@ -14,8 +14,8 @@ contract MockCTF is IConditionalTokens {
     mapping(address => mapping(uint256 => uint256)) public balances;
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
-    function prepareCondition(address, bytes32, uint256) external override {}
-    function reportPayouts(bytes32, uint256[] calldata) external override {}
+    function prepareCondition(address, bytes32, uint256) external override { }
+    function reportPayouts(bytes32, uint256[] calldata) external override { }
 
     function splitPosition(
         address collateralToken,
@@ -26,7 +26,7 @@ contract MockCTF is IConditionalTokens {
     ) external override {
         // Mint CTF tokens and burn USDC
         // Just mock behavior for testing
-        for(uint i=0; i<partition.length; i++){
+        for (uint256 i = 0; i < partition.length; i++) {
             bytes32 collId = getCollectionId(parentCollectionId, conditionId, partition[i]);
             uint256 posId = getPositionId(collateralToken, collId);
             balances[msg.sender][posId] += amount;
@@ -40,40 +40,49 @@ contract MockCTF is IConditionalTokens {
         uint256[] calldata partition,
         uint256 amount
     ) external override {
-        for(uint i=0; i<partition.length; i++){
+        for (uint256 i = 0; i < partition.length; i++) {
             bytes32 collId = getCollectionId(parentCollectionId, conditionId, partition[i]);
             uint256 posId = getPositionId(collateralToken, collId);
             balances[msg.sender][posId] -= amount;
         }
     }
 
-    function redeemPositions(address, bytes32, bytes32, uint256[] calldata) external override {}
+    function redeemPositions(address, bytes32, bytes32, uint256[] calldata) external override { }
 
     function getConditionId(address, bytes32, uint256) external pure override returns (bytes32) {
         return bytes32(0);
     }
 
-    function getCollectionId(bytes32, bytes32 conditionId, uint256 indexSet) public pure override returns (bytes32) {
+    function getCollectionId(bytes32, bytes32 conditionId, uint256 indexSet)
+        public
+        pure
+        override
+        returns (bytes32)
+    {
         return keccak256(abi.encode(conditionId, indexSet));
     }
 
-    function getPositionId(address collateralToken, bytes32 collectionId) public pure override returns (uint256) {
+    function getPositionId(address collateralToken, bytes32 collectionId)
+        public
+        pure
+        override
+        returns (uint256)
+    {
         return uint256(keccak256(abi.encode(collateralToken, collectionId)));
     }
 
-    function payoutDenominator(bytes32) external view override returns (uint256) { return 0; }
+    function payoutDenominator(bytes32) external view override returns (uint256) {
+        return 0;
+    }
 
     function balanceOf(address account, uint256 positionId) external view override returns (uint256) {
         return balances[account][positionId];
     }
 
-    function safeTransferFrom(
-        address from,
-        address to,
-        uint256 id,
-        uint256 amount,
-        bytes calldata
-    ) external override {
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata)
+        external
+        override
+    {
         require(from == msg.sender || isApprovedForAll[from][msg.sender], "Not approved");
         balances[from][id] -= amount;
         balances[to][id] += amount;
@@ -128,12 +137,39 @@ contract SettlementExchangeTest is Test {
         vm.stopPrank();
     }
 
-    function _signOrder(SettlementExchange.Order memory order, uint256 pk) internal view returns (bytes memory) {
-        bytes32 orderHash = keccak256(abi.encode(
-            exchange.ORDER_TYPEHASH(), order.salt, order.maker, order.signer, order.conditionId, order.parentCollectionId,
-            order.positionId, order.price, order.amount, order.side, order.nonce, order.deadline
-        ));
-        bytes32 domainSeparator = keccak256(abi.encode(keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"), keccak256(bytes("Omniscient Exchange")), keccak256(bytes("1")), block.chainid, address(exchange))); bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, orderHash));
+    function _signOrder(SettlementExchange.Order memory order, uint256 pk)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 orderHash = keccak256(
+            abi.encode(
+                exchange.ORDER_TYPEHASH(),
+                order.salt,
+                order.maker,
+                order.signer,
+                order.conditionId,
+                order.parentCollectionId,
+                order.positionId,
+                order.price,
+                order.amount,
+                order.side,
+                order.nonce,
+                order.deadline
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes("Omniscient Exchange")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(exchange)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, orderHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -142,7 +178,8 @@ contract SettlementExchangeTest is Test {
         // Alice buys 10 shares at 0.5 USDC = 5 USDC
         // Bob sells 10 shares at 0.5 USDC = 5 USDC
 
-        uint256 positionId = ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), bytes32(uint256(1)), 1));
+        uint256 positionId =
+            ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), bytes32(uint256(1)), 1));
 
         SettlementExchange.Order memory aliceOrder = SettlementExchange.Order({
             salt: bytes32(uint256(1)),
@@ -173,14 +210,10 @@ contract SettlementExchangeTest is Test {
         });
 
         SettlementExchange.SignedOrder[] memory orders = new SettlementExchange.SignedOrder[](2);
-        orders[0] = SettlementExchange.SignedOrder({
-            order: aliceOrder,
-            signature: _signOrder(aliceOrder, alicePk)
-        });
-        orders[1] = SettlementExchange.SignedOrder({
-            order: bobOrder,
-            signature: _signOrder(bobOrder, bobPk)
-        });
+        orders[0] =
+            SettlementExchange.SignedOrder({ order: aliceOrder, signature: _signOrder(aliceOrder, alicePk) });
+        orders[1] =
+            SettlementExchange.SignedOrder({ order: bobOrder, signature: _signOrder(bobOrder, bobPk) });
 
         uint256[] memory fills = new uint256[](2);
         fills[0] = 10;
@@ -203,18 +236,12 @@ contract SettlementExchangeTest is Test {
         ctfDeltas[0] = SettlementExchange.CtfDelta({ account: alice, positionId: positionId, amount: 10 });
         ctfDeltas[1] = SettlementExchange.CtfDelta({ account: bob, positionId: positionId, amount: -10 });
 
-        SettlementExchange.SplitMergeInstruction[] memory instructions = new SettlementExchange.SplitMergeInstruction[](0);
+        SettlementExchange.SplitMergeInstruction[] memory instructions =
+            new SettlementExchange.SplitMergeInstruction[](0);
 
         vm.startPrank(operator);
         exchange.settleBatch(
-            bytes32(uint256(999)),
-            orders,
-            fills,
-            usdcDeltas,
-            ctfDeltas,
-            instructions,
-            bytes(""),
-            0
+            bytes32(uint256(999)), orders, fills, usdcDeltas, ctfDeltas, instructions, bytes(""), 0
         );
         vm.stopPrank();
 

@@ -74,12 +74,13 @@ The Settlement Service is the operator-controlled worker responsible for bridgin
 
 ## 3. Resolution Service
 
-The Resolution Service operates as an asynchronous worker that manages market finalization through the resolver registry, implementing Pyth oracle integrations and AI optimistic-oracle proposals.
+The Resolution Service operates as an asynchronous worker that manages market finalization through the resolver registry, implementing AI optimistic-oracle proposals (and deferred post-MVP: Pyth on-chain auto-finalize).
 
 ```text
       +--------------------+
       |  External Sources  |
-      | (Pyth / LLM / API) |
+      | (LLM / API)        |
+      | Pyth deferred MVP  |
       +---------+----------+
                 |
                 | HTTP Query / JSON Fetch
@@ -89,8 +90,9 @@ The Resolution Service operates as an asynchronous worker that manages market fi
 |                                                       |
 |  +-------------------+        +--------------------+  |
 |  | Resolver Registry |        | Commit-Reveal Loop |  |
-|  | - Class A (Pyth)   |=======>| - Generate hash    |  |
-|  | - Class C (AI LLM) |  IPC   | - Manage dispute   |  |
+|  | - Class B (API)    |=======>| - Generate hash    |  |
+|  | - Class C (AI)     |  IPC   | - Manage dispute   |  |
+|  | - Class A (Pyth)   |deferred|                    |  |
 |  +-------------------+        +---------+----------+  |
 |                                         |             |
 +-----------------------------------------|-------------+
@@ -103,8 +105,8 @@ The Resolution Service operates as an asynchronous worker that manages market fi
 ```
 
 ### Key Responsibilities
-- **Resolver Registry Dispatch:** Dynamically routes expired markets to specialized handlers (Class A on-chain or Class B/C optimistic off-chain) mapped inside a unified `Resolver` abstraction.
-- **On-Chain Proof Sourcing:** Fetches historical Pyth Benchmark payloads on-demand at exact expiry intervals to pass to the Oracle's on-chain verifiers.
+- **Resolver Registry Dispatch:** Dynamically routes expired markets to specialized handlers (Class B/C optimistic off-chain) mapped inside a unified `Resolver` abstraction. Class A (Pyth) is deferred post-MVP.
+- **On-Chain Proof Sourcing (post-MVP):** Would fetch historical Pyth Benchmark payloads on-demand at exact expiry intervals to pass to the Oracle's on-chain verifiers.
 - **AI Claim Synthesis:** Directs LLM prompts, parses structured proposals, and verifies cited source URLs to generate cryptographic proof bundles.
 - **Commit-Reveal Execution:** Generates commit hashes, schedules revealed payloads, and monitors active challenge/dispute windows.
 

@@ -2,7 +2,7 @@
 
 > **Single source of truth.** This document explains what Omniscient is and walks the entire system end-to-end, step by step, following one trade through its full lifecycle (the *happy path*), then covers the supporting detail: components, resolution, state ownership, fund-safety, and trust boundaries.
 >
-> Reflects the locked decisions in `.devin/rules/omniscient.md`: Polygon PoS, off-chain Rust CLOB, Redpanda durable log, Pyth + AI optimistic-oracle resolution. **MVP-first:** the fewest moving parts that are correct and fund-safe.
+> Reflects the locked decisions in `.devin/rules/omniscient.md`: Polygon PoS, off-chain Rust CLOB, Redpanda durable log, AI optimistic-oracle resolution. **MVP-first:** the fewest moving parts that are correct and fund-safe. Class A (Pyth on-chain auto-finalize) is **deferred post-MVP**.
 
 ---
 
@@ -28,11 +28,11 @@ It fixes four problems with existing platforms:
 | **Untrusted**           | Web UI / dApp                                                | User wallet; signs EIP-712 orders; submits/queries; renders live feed.                             |
 | **Operator (Rust)**     | Gateway (Order API + Matching Engine)                        | Verifies signed orders, holds collateral, matches off-chain (single-writer per market).            |
 | **Operator (Rust)**     | Settlement Service                                           | Consumes matches, nets position deltas, submits batched on-chain txs, waits for finality.          |
-| **Operator (Rust)**     | Resolution Service                                           | On market expiry, dispatches to a resolver (Pyth / data API / AI) and drives commit-reveal.        |
+| **Operator (Rust)**     | Resolution Service                                           | On market expiry, dispatches to a resolver (data API / AI) and drives commit-reveal.               |
 | **Operator (Rust)**     | Chain Indexer                                                | The **only** path back from finalized chain state → off-chain (credits, finality, reorg rollback). |
 | **Tooling**             | Redpanda                                                     | Durable event log (Kafka API) — durability, replay, decoupling, audit. **Not** throughput.         |
 | **Tooling**             | Postgres                                                     | Operational store: open orders, holds, nonces, batch state, audit. Never the fund authority.       |
-| **Trustless (Polygon)** | Custody/Vault, Settlement Exchange, Gnosis CTF, Oracle, Pyth | Hold USDC, apply net deltas, mint/redeem outcome tokens, commit-reveal resolution, verify prices.  |
+| **Trustless (Polygon)** | Custody/Vault, Settlement Exchange, Gnosis CTF, Oracle        | Hold USDC, apply net deltas, mint/redeem outcome tokens, commit-reveal resolution.                 |
 
 **Two invariants the topology enforces:**
 
@@ -48,7 +48,7 @@ It fixes four problems with existing platforms:
  indexer      (chain → off-chain reconciliation)             :7004 metrics
  redpanda     (single binary, no JVM/ZK)                     :9092 / :9644 / :8081
  postgres                                                    :5432
- external:    Polygon RPC · LLM provider · Pyth Hermes · KMS/HSM · Safe multisig
+ external:    Polygon RPC · LLM provider · KMS/HSM · Safe multisig
 ```
 
 Only `gateway:8080` is public. Everything else is operator-internal.
@@ -90,7 +90,7 @@ flowchart TB
         EXCH["Settlement Contract<br/>net deltas · batched"]
         CTF["Gnosis CTF<br/>ERC-1155 outcomes"]
         ORACLE["Oracle<br/>commit-reveal · dispute"]
-        PYTH["Pyth pull oracle<br/>+ Benchmarks"]
+        PYTH["Pyth pull oracle<br/>+ Benchmarks<br/>(deferred post-MVP)"]
     end
 
     UI -->|"1 · deposit USDC"| CUST
@@ -106,7 +106,7 @@ flowchart TB
     EXCH --> CTF
     RES -->|"7 · commit/reveal"| ORACLE
     RES -.->|audit| T4
-    ORACLE -->|price markets| PYTH
+    ORACLE -.->|price markets<br/>(post-MVP)| PYTH
     ORACLE -->|"8 · set outcome"| CTF
     UI -->|"9 · redeem shares"| CTF
     Chain ==>|events| IDX
@@ -125,12 +125,13 @@ flowchart TB
     class PG store;
     class T1,T3,T4 broker;
     class CUST,EXCH,CTF,ORACLE,PYTH chain;
+    class PYTH deferred
 ```
 
 ### Step 0 — Market creation
 
 - **Who:** a creator (any user) via the dApp.
-- **What:** posts a question with a clear expiry and a `ResolutionSpec` naming a `resolver_id` (e.g. `pyth`, `weather`, `ai`) plus resolver params (feed id, comparator, threshold…). Posts a refundable **anti-spam collateral bond**.
+- **What:** posts a question with a clear expiry and a `ResolutionSpec` naming a `resolver_id` (e.g. `weather`, `ai`) plus resolver params. Posts a refundable **anti-spam collateral bond**.
 - **Validation:** the resolver registry runs `validate_spec` at creation. **A market cannot be created with a spec no resolver can answer.**
 - **Result:** market enters state `open`. Outcome tokens are defined via Gnosis CTF.
 
@@ -223,9 +224,10 @@ sequenceDiagram
 
 The Resolution Service dispatches the expired market through the **resolver registry** by its `resolver_id`. See Part 3 for the full model. Summary of the happy path:
 
-- **Class A (e.g. Pyth):** fetch the Benchmark price at expiry, verify on-chain via `parsePriceFeedUpdates` → deterministic, on-chain-proven → **auto-finalize**.
+- **Class A (e.g. Pyth):** deferred post-MVP. Would fetch the Benchmark price at expiry and verify on-chain via `parsePriceFeedUpdates` → deterministic, on-chain-proven → **auto-finalize**.
 - **Class B (trusted data API):** deterministic parse → commit-reveal + **full bonded dispute window**.
 - **Class C (AI proposer):** LLM proposes outcome + confidence + evidence, **fetches and verifies cited sources**, commits the intent hash on-chain, reveals, then rides the bonded dispute window.
+- **MVP:** only **Class B and Class C** are wired on-chain. Both use the same commit-reveal + dispute path.
 
 On the happy path, the dispute window passes with **no dispute** → the Oracle finalizes the outcome and sets it on the CTF. Market: `proposed → resolved → settled`.
 
@@ -286,16 +288,18 @@ sequenceDiagram
 
 Resolution is a **registry of resolvers**, not two hardcoded branches. Each market's `ResolutionSpec` names a `resolver_id`; the registry dispatches by **explicit lookup**. There is no implicit "Pyth if price, AI otherwise" — AI is simply the catch-all resolver a creator selects when no structured source fits.
 
+> **MVP scope:** Class A (Pyth) is **deferred post-MVP**. The on-chain Oracle contract only implements Class B and Class C (both commit-reveal + dispute).
+
 ```mermaid
 flowchart TB
     EXP["Market expired"] --> REG{"Resolver Registry<br/>dispatch by resolver_id"}
 
-    REG -->|"resolver_id = pyth (Class A)"| PYTH["Fetch Pyth Benchmark at expiry"]
+    REG -->|"resolver_id = pyth (Class A) — deferred post-MVP"| PYTH["Fetch Pyth Benchmark at expiry"]
     PYTH --> VERIFY["parsePriceFeedUpdates<br/>(verify on-chain, pay updateFee)"]
     VERIFY --> AUTO["Deterministic, on-chain-proven outcome"]
     AUTO --> FINAL
 
-    REG -->|"resolver_id = weather/sports… (Class B)"| API["Query authoritative API<br/>(example, not implemented)"]
+    REG -->|"resolver_id = weather/sports… (Class B)"| API["Query authoritative API<br/>(MVP — wired on-chain)"]
     API --> PARSE["Deterministic parse + validate source"]
     PARSE --> COMMIT
 

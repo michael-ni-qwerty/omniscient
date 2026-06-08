@@ -6,8 +6,6 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IConditionalTokens } from "./interfaces/IConditionalTokens.sol";
-import { IPyth } from "./interfaces/IPyth.sol";
-import { PythStructs } from "./interfaces/IPyth.sol";
 
 contract Oracle is AccessControl, Pausable {
     using SafeERC20 for IERC20;
@@ -16,16 +14,23 @@ contract Oracle is AccessControl, Pausable {
     bytes32 public constant ARBITRATOR_ROLE = keccak256("ARBITRATOR_ROLE");
     bytes32 public constant MARKET_CREATOR_ROLE = keccak256("MARKET_CREATOR_ROLE");
 
-    enum Class { A, B, C }
-    enum MarketState { OPEN, EXPIRED, PROPOSED, DISPUTED, RESOLVED }
+    enum Class {
+        B,
+        C
+    }
+    enum MarketState {
+        OPEN,
+        EXPIRED,
+        PROPOSED,
+        DISPUTED,
+        RESOLVED
+    }
 
     struct ResolutionSpec {
         Class class;
         bytes32 questionId;
         uint256 outcomeSlotCount;
         uint256 expiry;
-        bytes32 pythPriceId;
-        uint256 pythStrikePrice;
         uint256 revealWindow;
         uint256 disputeWindow;
         uint256 proposerBondAmount;
@@ -43,7 +48,6 @@ contract Oracle is AccessControl, Pausable {
     }
 
     IConditionalTokens public immutable ctf;
-    IPyth public immutable pyth;
     IERC20 public immutable usdc;
 
     mapping(bytes32 => ResolutionSpec) public specs;
@@ -52,19 +56,15 @@ contract Oracle is AccessControl, Pausable {
 
     error InvalidState();
     error NotExpired();
-    error MustBeClassA();
-    error MustBeClassBorC();
     error Disputed();
     error DisputeWindowNotPassed();
     error DisputeWindowPassed();
     error NotRevealed();
     error AlreadyRevealed();
     error InvalidCommitment();
-    error PythPublishTimeInvalid();
     error InvalidPayouts();
     error RevealWindowPassed();
     error RevealWindowNotPassed();
-    error InvalidPrice();
 
     event MarketCreated(bytes32 indexed marketId, Class class, bytes32 questionId, uint256 expiry);
     event OutcomeProposed(bytes32 indexed marketId, bytes32 commitment, address proposer);
@@ -73,79 +73,21 @@ contract Oracle is AccessControl, Pausable {
     event OutcomeResolved(bytes32 indexed marketId, uint256[] payouts);
     event DisputeResolved(bytes32 indexed marketId, uint256[] payouts);
 
-    constructor(address _ctf, address _pyth, address _usdc) {
+    constructor(address _ctf, address _usdc) {
         ctf = IConditionalTokens(_ctf);
-        pyth = IPyth(_pyth);
         usdc = IERC20(_usdc);
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
-    function createMarket(
-        bytes32 marketId,
-        ResolutionSpec calldata spec
-    ) external onlyRole(MARKET_CREATOR_ROLE) whenNotPaused {
+    function createMarket(bytes32 marketId, ResolutionSpec calldata spec)
+        external
+        onlyRole(MARKET_CREATOR_ROLE)
+        whenNotPaused
+    {
         if (specs[marketId].expiry != 0) revert InvalidState();
         ctf.prepareCondition(address(this), spec.questionId, spec.outcomeSlotCount);
         specs[marketId] = spec;
         emit MarketCreated(marketId, spec.class, spec.questionId, spec.expiry);
-    }
-
-    function resolvePythMarket(
-        bytes32 marketId,
-        bytes[] calldata priceUpdateData
-    ) external payable whenNotPaused {
-        ResolutionSpec memory spec = specs[marketId];
-        if (spec.class != Class.A) revert MustBeClassA();
-        if (states[marketId] != MarketState.OPEN) revert InvalidState();
-        if (block.timestamp < spec.expiry) revert NotExpired();
-
-        uint256 fee = pyth.getUpdateFee(priceUpdateData);
-        bytes32[] memory priceIds = new bytes32[](1);
-        priceIds[0] = spec.pythPriceId;
-
-        PythStructs[] memory priceFeeds = pyth.parsePriceFeedUpdates{value: fee}(
-            priceUpdateData,
-            priceIds,
-            uint64(spec.expiry),
-            uint64(spec.expiry + 60)
-        );
-
-        PythStructs memory feed = priceFeeds[0];
-        if (feed.publishTime < spec.expiry || feed.publishTime > spec.expiry + 60) revert PythPublishTimeInvalid();
-        uint256 priceMag = feed.price >= 0 ? uint256(uint64(feed.price)) : uint256(uint64(-feed.price));
-        if (feed.conf > 0 && priceMag / feed.conf < 10) revert InvalidPrice();
-
-        int64 price = feed.price;
-        int32 expo = feed.expo;
-
-        if (price < 0) revert InvalidPrice();
-
-        uint256 raw = uint256(uint64(price));
-        uint256 actualPrice;
-        if (expo < 0) {
-            uint256 divisor = 10 ** uint32(-expo);
-            actualPrice = raw / divisor;
-        } else {
-            uint256 multiplier = 10 ** uint32(expo);
-            actualPrice = raw * multiplier;
-        }
-
-        uint256[] memory payouts = new uint256[](spec.outcomeSlotCount);
-        if (actualPrice >= spec.pythStrikePrice) {
-            payouts[1] = 1;
-        } else {
-            payouts[0] = 1;
-        }
-
-        states[marketId] = MarketState.RESOLVED;
-        ctf.reportPayouts(spec.questionId, payouts);
-        emit OutcomeResolved(marketId, payouts);
-
-        // Refund excess fee (use call: .transfer's 2300-gas stipend breaks contract callers).
-        if (msg.value > fee) {
-            (bool ok,) = payable(msg.sender).call{value: msg.value - fee}("");
-            require(ok, "refund failed");
-        }
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {
@@ -159,7 +101,6 @@ contract Oracle is AccessControl, Pausable {
     // Class B / C
     function commitOutcome(bytes32 marketId, bytes32 commitment) external whenNotPaused {
         ResolutionSpec memory spec = specs[marketId];
-        if (spec.class == Class.A) revert MustBeClassBorC();
         if (states[marketId] != MarketState.OPEN) revert InvalidState();
         if (block.timestamp < spec.expiry) revert NotExpired();
 
@@ -174,7 +115,10 @@ contract Oracle is AccessControl, Pausable {
         emit OutcomeProposed(marketId, commitment, msg.sender);
     }
 
-    function revealOutcome(bytes32 marketId, uint256[] calldata payouts, bytes32 salt) external whenNotPaused {
+    function revealOutcome(bytes32 marketId, uint256[] calldata payouts, bytes32 salt)
+        external
+        whenNotPaused
+    {
         if (states[marketId] != MarketState.PROPOSED) revert InvalidState();
         ResolutionSpec memory spec = specs[marketId];
         OptimisticState storage os = optimisticStates[marketId];

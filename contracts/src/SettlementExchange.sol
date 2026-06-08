@@ -146,10 +146,24 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
             if (fill == 0) continue;
             Order memory o = orders[i].order;
 
-            bytes32 orderHash = _hashTypedDataV4(keccak256(abi.encode(
-                ORDER_TYPEHASH, o.salt, o.maker, o.signer, o.conditionId, o.parentCollectionId,
-                o.positionId, o.price, o.amount, o.side, o.nonce, o.deadline
-            )));
+            bytes32 orderHash = _hashTypedDataV4(
+                keccak256(
+                    abi.encode(
+                        ORDER_TYPEHASH,
+                        o.salt,
+                        o.maker,
+                        o.signer,
+                        o.conditionId,
+                        o.parentCollectionId,
+                        o.positionId,
+                        o.price,
+                        o.amount,
+                        o.side,
+                        o.nonce,
+                        o.deadline
+                    )
+                )
+            );
 
             if (block.timestamp > o.deadline) revert OrderExpired();
             // Cancellation-epoch check keyed by the funds owner (maker), NOT incremented per fill,
@@ -195,16 +209,18 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
 
             if (inst.action == 0) {
                 _expectedUsdc[address(this)] -= int256(inst.amount);
-                for(uint j=0; j < inst.partition.length; j++) {
-                    bytes32 collId = ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
+                for (uint256 j = 0; j < inst.partition.length; j++) {
+                    bytes32 collId =
+                        ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
                     uint256 posId = ctf.getPositionId(address(usdc), collId);
                     _touchPosition(posId);
                     _expectedCtf[address(this)][posId] += int256(inst.amount);
                 }
             } else {
                 _expectedUsdc[address(this)] += int256(inst.amount);
-                for(uint j=0; j < inst.partition.length; j++) {
-                    bytes32 collId = ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
+                for (uint256 j = 0; j < inst.partition.length; j++) {
+                    bytes32 collId =
+                        ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
                     uint256 posId = ctf.getPositionId(address(usdc), collId);
                     _touchPosition(posId);
                     _expectedCtf[address(this)][posId] -= int256(inst.amount);
@@ -213,7 +229,10 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         }
     }
 
-    function _verifyAndClearExpectations(ICustody.BalanceDelta[] calldata usdcDeltas, CtfDelta[] calldata ctfDeltas) private {
+    function _verifyAndClearExpectations(
+        ICustody.BalanceDelta[] calldata usdcDeltas,
+        CtfDelta[] calldata ctfDeltas
+    ) private {
         for (uint256 i = 0; i < usdcDeltas.length; i++) {
             _expectedUsdc[usdcDeltas[i].account] -= usdcDeltas[i].amount;
         }
@@ -223,11 +242,15 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
 
         for (uint256 i = 0; i < _touchedAccounts.length; i++) {
             address acc = _touchedAccounts[i];
-            if (acc != address(this) && _expectedUsdc[acc] != 0) revert MathNotJustifiedUsdc(acc, _expectedUsdc[acc]);
+            if (acc != address(this) && _expectedUsdc[acc] != 0) {
+                revert MathNotJustifiedUsdc(acc, _expectedUsdc[acc]);
+            }
             delete _expectedUsdc[acc];
             for (uint256 j = 0; j < _touchedPositions.length; j++) {
                 uint256 posId = _touchedPositions[j];
-                if (_expectedCtf[acc][posId] != 0) revert MathNotJustifiedCtf(acc, posId, _expectedCtf[acc][posId]);
+                if (_expectedCtf[acc][posId] != 0) {
+                    revert MathNotJustifiedCtf(acc, posId, _expectedCtf[acc][posId]);
+                }
                 delete _expectedCtf[acc][posId];
             }
         }
@@ -240,7 +263,9 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
             if (ctfDeltas[i].account == address(this)) continue;
             int256 amt = ctfDeltas[i].amount;
             if (amt < 0) {
-                ctf.safeTransferFrom(ctfDeltas[i].account, address(this), ctfDeltas[i].positionId, uint256(-amt), "");
+                ctf.safeTransferFrom(
+                    ctfDeltas[i].account, address(this), ctfDeltas[i].positionId, uint256(-amt), ""
+                );
             }
         }
     }
@@ -250,12 +275,18 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
             if (ctfDeltas[i].account == address(this)) continue;
             int256 amt = ctfDeltas[i].amount;
             if (amt > 0) {
-                ctf.safeTransferFrom(address(this), ctfDeltas[i].account, ctfDeltas[i].positionId, uint256(amt), "");
+                ctf.safeTransferFrom(
+                    address(this), ctfDeltas[i].account, ctfDeltas[i].positionId, uint256(amt), ""
+                );
             }
         }
     }
 
-    function _executeSplitsAndMerges(SplitMergeInstruction[] calldata instructions, bytes calldata sig, uint256 deadline) private {
+    function _executeSplitsAndMerges(
+        SplitMergeInstruction[] calldata instructions,
+        bytes calldata sig,
+        uint256 deadline
+    ) private {
         uint256 splits = 0;
         uint256 merges = 0;
         for (uint256 i = 0; i < instructions.length; i++) {
@@ -275,9 +306,13 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         for (uint256 i = 0; i < instructions.length; i++) {
             SplitMergeInstruction memory inst = instructions[i];
             if (inst.action == 0) {
-                ctf.splitPosition(address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount);
+                ctf.splitPosition(
+                    address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount
+                );
             } else {
-                ctf.mergePositions(address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount);
+                ctf.mergePositions(
+                    address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount
+                );
             }
         }
 
@@ -289,19 +324,32 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
     }
 
     function _touchAccount(address acc) private {
-        for(uint i=0; i<_touchedAccounts.length; i++) if (_touchedAccounts[i] == acc) return;
+        for (uint256 i = 0; i < _touchedAccounts.length; i++) {
+            if (_touchedAccounts[i] == acc) return;
+        }
         _touchedAccounts.push(acc);
     }
 
     function _touchPosition(uint256 pos) private {
-        for(uint i=0; i<_touchedPositions.length; i++) if (_touchedPositions[i] == pos) return;
+        for (uint256 i = 0; i < _touchedPositions.length; i++) {
+            if (_touchedPositions[i] == pos) return;
+        }
         _touchedPositions.push(pos);
     }
 
-    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external pure returns (bytes4) {
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+        external
+        pure
+        returns (bytes4)
+    {
         return this.onERC1155Received.selector;
     }
-    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata) external pure returns (bytes4) {
+
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+        external
+        pure
+        returns (bytes4)
+    {
         return this.onERC1155BatchReceived.selector;
     }
 }
