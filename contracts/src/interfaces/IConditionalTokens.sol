@@ -48,4 +48,12 @@ interface IConditionalTokens {
     function payoutDenominator(bytes32 conditionId) external view returns (uint256);
 
     function balanceOf(address account, uint256 positionId) external view returns (uint256);
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 id,
+        uint256 amount,
+        bytes calldata data
+    ) external;
 }
