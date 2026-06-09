@@ -71,7 +71,7 @@ contract MockCTF is IConditionalTokens {
         return uint256(keccak256(abi.encode(collateralToken, collectionId)));
     }
 
-    function payoutDenominator(bytes32) external view override returns (uint256) {
+    function payoutDenominator(bytes32) external pure override returns (uint256) {
         return 0;
     }
 
@@ -106,10 +106,13 @@ contract SettlementExchangeTest is Test {
     uint256 public alicePk;
     address public bob;
     uint256 public bobPk;
+    address public signer;
+    uint256 public signerPk;
 
     function setUp() public {
         (alice, alicePk) = makeAddrAndKey("alice");
         (bob, bobPk) = makeAddrAndKey("bob");
+        (signer, signerPk) = makeAddrAndKey("signer");
 
         usdc = new MockUSDC();
         ctf = new MockCTF();
@@ -119,7 +122,9 @@ contract SettlementExchangeTest is Test {
 
         custody.grantRole(custody.SETTLEMENT_ROLE(), address(exchange));
         custody.grantRole(custody.WITHDRAWAL_SIGNER_ROLE(), address(exchange));
+        custody.grantRole(custody.WITHDRAWAL_SIGNER_ROLE(), signer);
         exchange.grantRole(exchange.OPERATOR_ROLE(), operator);
+        exchange.setFeeRates(50, 10);
 
         usdc.mint(alice, 1000e6);
         usdc.mint(bob, 1000e6);
@@ -174,9 +179,59 @@ contract SettlementExchangeTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    function _signWithdrawal(
+        address account,
+        uint256 amount,
+        address to,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 pk
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("Withdrawal(address account,uint256 amount,address to,uint256 nonce,uint256 deadline)"),
+                account,
+                amount,
+                to,
+                nonce,
+                deadline
+            )
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes("Omniscient Custody")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(custody)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function test_withdrawFees_Success() public {
+        test_settleBatch_Success();
+
+        uint256 amount = 1;
+        address to = admin;
+        uint256 deadline = block.timestamp + 100;
+        uint256 nonce = custody.withdrawalNonce(address(exchange));
+        bytes memory sig = _signWithdrawal(address(exchange), amount, to, nonce, deadline, signerPk);
+
+        vm.prank(admin);
+        exchange.withdrawFees(amount, to, deadline, sig);
+
+        assertEq(custody.balanceOf(address(exchange)), 0);
+        assertEq(usdc.balanceOf(admin), amount);
+    }
+
     function test_settleBatch_Success() public {
-        // Alice buys 10 shares at 0.5 USDC = 5 USDC
-        // Bob sells 10 shares at 0.5 USDC = 5 USDC
+        // Alice buys 10 shares at 0.5 USDC = 5 USDC (taker, fee rounds up to 1)
+        // Bob sells 10 shares at 0.5 USDC = 5 USDC (maker, rebate rounds down to 0)
 
         uint256 positionId =
             ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), bytes32(uint256(1)), 1));
@@ -219,6 +274,10 @@ contract SettlementExchangeTest is Test {
         fills[0] = 10;
         fills[1] = 10;
 
+        bool[] memory isMaker = new bool[](2);
+        isMaker[0] = false; // Alice is taker
+        isMaker[1] = true;  // Bob is maker
+
         // Bob needs 10 CTF shares to sell.
         uint256[] memory partition = new uint256[](2);
         partition[0] = 1;
@@ -227,10 +286,11 @@ contract SettlementExchangeTest is Test {
         vm.prank(address(this));
         ctf.safeTransferFrom(address(this), bob, positionId, 10, "");
 
-        // Price 0.5 => 10 shares * 0.5 = 5 USDC
-        ICustody.BalanceDelta[] memory usdcDeltas = new ICustody.BalanceDelta[](2);
-        usdcDeltas[0] = ICustody.BalanceDelta({ account: alice, amount: -5 });
+        // Alice pays 5 + 1 = 6; Bob receives 5 - 0 = 5; Exchange nets +1
+        ICustody.BalanceDelta[] memory usdcDeltas = new ICustody.BalanceDelta[](3);
+        usdcDeltas[0] = ICustody.BalanceDelta({ account: alice, amount: -6 });
         usdcDeltas[1] = ICustody.BalanceDelta({ account: bob, amount: 5 });
+        usdcDeltas[2] = ICustody.BalanceDelta({ account: address(exchange), amount: 1 });
 
         SettlementExchange.CtfDelta[] memory ctfDeltas = new SettlementExchange.CtfDelta[](2);
         ctfDeltas[0] = SettlementExchange.CtfDelta({ account: alice, positionId: positionId, amount: 10 });
@@ -241,13 +301,76 @@ contract SettlementExchangeTest is Test {
 
         vm.startPrank(operator);
         exchange.settleBatch(
-            bytes32(uint256(999)), orders, fills, usdcDeltas, ctfDeltas, instructions, bytes(""), 0
+            bytes32(uint256(999)), orders, fills, isMaker, usdcDeltas, ctfDeltas, instructions, bytes(""), 0
         );
         vm.stopPrank();
 
-        assertEq(custody.balanceOf(alice), 100e6 - 5);
+        assertEq(custody.balanceOf(alice), 100e6 - 6);
         assertEq(custody.balanceOf(bob), 100e6 + 5);
+        assertEq(custody.balanceOf(address(exchange)), 1);
         assertEq(ctf.balanceOf(alice, positionId), 10);
         assertEq(ctf.balanceOf(bob, positionId), 0);
+    }
+
+    /// @notice An operator-crafted USDC delta to an account with NO backing order must revert.
+    ///         Net-zero deltas pass Custody's conservation check, so this verification is the
+    ///         only thing preventing the operator from moving user funds without a signed order.
+    function test_settleBatch_RevertWhen_UnjustifiedUsdcDelta() public {
+        SettlementExchange.SignedOrder[] memory orders = new SettlementExchange.SignedOrder[](0);
+        uint256[] memory fills = new uint256[](0);
+        bool[] memory isMaker = new bool[](0);
+
+        // Move 1 USDC from alice to bob with no order justifying either leg. Net == 0.
+        ICustody.BalanceDelta[] memory usdcDeltas = new ICustody.BalanceDelta[](2);
+        usdcDeltas[0] = ICustody.BalanceDelta({ account: alice, amount: -1 });
+        usdcDeltas[1] = ICustody.BalanceDelta({ account: bob, amount: 1 });
+
+        SettlementExchange.CtfDelta[] memory ctfDeltas = new SettlementExchange.CtfDelta[](0);
+        SettlementExchange.SplitMergeInstruction[] memory instructions =
+            new SettlementExchange.SplitMergeInstruction[](0);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(SettlementExchange.MathNotJustifiedUsdc.selector, alice, int256(1))
+        );
+        exchange.settleBatch(
+            bytes32(uint256(1000)), orders, fills, isMaker, usdcDeltas, ctfDeltas, instructions, bytes(""), 0
+        );
+    }
+
+    /// @notice An operator-crafted CTF delta to an account with NO backing order must revert,
+    ///         even when the exchange holds the shares to push.
+    function test_settleBatch_RevertWhen_UnjustifiedCtfDelta() public {
+        uint256 positionId =
+            ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), bytes32(uint256(1)), 1));
+
+        // Fund the exchange with CTF so the push itself would succeed if verification were skipped.
+        uint256[] memory partition = new uint256[](2);
+        partition[0] = 1;
+        partition[1] = 2;
+        ctf.splitPosition(address(usdc), bytes32(0), bytes32(uint256(1)), partition, 10);
+        ctf.safeTransferFrom(address(this), address(exchange), positionId, 10, "");
+
+        SettlementExchange.SignedOrder[] memory orders = new SettlementExchange.SignedOrder[](0);
+        uint256[] memory fills = new uint256[](0);
+        bool[] memory isMaker = new bool[](0);
+        ICustody.BalanceDelta[] memory usdcDeltas = new ICustody.BalanceDelta[](0);
+
+        // Push 5 CTF to alice with no order; exchange leg unbalanced but exchange CTF is verified too.
+        SettlementExchange.CtfDelta[] memory ctfDeltas = new SettlementExchange.CtfDelta[](1);
+        ctfDeltas[0] = SettlementExchange.CtfDelta({ account: alice, positionId: positionId, amount: 5 });
+
+        SettlementExchange.SplitMergeInstruction[] memory instructions =
+            new SettlementExchange.SplitMergeInstruction[](0);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SettlementExchange.MathNotJustifiedCtf.selector, alice, positionId, int256(-5)
+            )
+        );
+        exchange.settleBatch(
+            bytes32(uint256(1001)), orders, fills, isMaker, usdcDeltas, ctfDeltas, instructions, bytes(""), 0
+        );
     }
 }

@@ -21,6 +21,9 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
     IConditionalTokens public immutable ctf;
     IERC20 public immutable usdc;
 
+    uint256 public takerFeeBps;
+    uint256 public makerRebateBps;
+
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(bytes32 salt,address maker,address signer,bytes32 conditionId,bytes32 parentCollectionId,uint256 positionId,uint256 price,uint256 amount,uint8 side,uint256 nonce,uint256 deadline)"
     );
@@ -82,9 +85,11 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
     error MathNotJustifiedCtf(address account, uint256 positionId, int256 expected);
     error LengthMismatch();
     error BatchAlreadySettled(bytes32 batchId);
+    error InvalidFee();
 
     event NonceInvalidated(address indexed maker, uint256 newNonce);
     event SignerApprovalSet(address indexed maker, address indexed signer, bool approved);
+    event FeeRatesUpdated(uint256 takerFeeBps, uint256 makerRebateBps);
 
     constructor(address _custody, address _ctf, address _usdc) EIP712("Omniscient Exchange", "1") {
         custody = ICustody(_custody);
@@ -99,6 +104,17 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
 
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
+    }
+
+    function setFeeRates(uint256 _takerFeeBps, uint256 _makerRebateBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_takerFeeBps > 1000 || _makerRebateBps > 1000) revert InvalidFee();
+        takerFeeBps = _takerFeeBps;
+        makerRebateBps = _makerRebateBps;
+        emit FeeRatesUpdated(_takerFeeBps, _makerRebateBps);
+    }
+
+    function withdrawFees(uint256 amount, address to, uint256 deadline, bytes calldata sig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        custody.withdraw(amount, to, deadline, sig);
     }
 
     /// @notice Mass-cancel all of the caller's outstanding signed orders by bumping their epoch.
@@ -117,6 +133,7 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         bytes32 batchId,
         SignedOrder[] calldata orders,
         uint256[] calldata fills,
+        bool[] calldata isMaker,
         ICustody.BalanceDelta[] calldata usdcDeltas,
         CtfDelta[] calldata ctfDeltas,
         SplitMergeInstruction[] calldata instructions,
@@ -126,9 +143,9 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         if (_settledBatches[batchId]) revert BatchAlreadySettled(batchId);
         _settledBatches[batchId] = true;
 
-        if (orders.length != fills.length) revert LengthMismatch();
+        if (orders.length != fills.length || orders.length != isMaker.length) revert LengthMismatch();
 
-        _processOrders(orders, fills);
+        _processOrders(orders, fills, isMaker);
         _processInstructions(instructions);
         _verifyAndClearExpectations(usdcDeltas, ctfDeltas);
 
@@ -140,7 +157,7 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         _pushOutboundCtf(ctfDeltas);
     }
 
-    function _processOrders(SignedOrder[] calldata orders, uint256[] calldata fills) private {
+    function _processOrders(SignedOrder[] calldata orders, uint256[] calldata fills, bool[] calldata isMaker) private {
         for (uint256 i = 0; i < orders.length; i++) {
             uint256 fill = fills[i];
             if (fill == 0) continue;
@@ -178,25 +195,39 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
             }
 
             uint256 filled = filledAmount[orderHash];
-            if (filled + fill > o.amount) revert Overfill(fill, o.amount - filled);
+            if (filled + fill > o.amount) revert Overfill(filled + fill, o.amount - filled);
             filledAmount[orderHash] = filled + fill;
 
-            int256 usdcAmount = int256((fill * o.price) / 1e6);
-            int256 ctfAmount = int256(fill);
+            int256 volume;
+            if (o.side == 0) {
+                volume = int256((fill * o.price + 999999) / 1e6);
+            } else {
+                volume = int256((fill * o.price) / 1e6);
+            }
+
+            int256 fee;
+            if (isMaker[i]) {
+                int256 rebate = (volume * int256(makerRebateBps)) / 10000;
+                fee = -rebate;
+            } else {
+                fee = (volume * int256(takerFeeBps) + 9999) / 10000;
+            }
 
             _touchAccount(o.maker);
             _touchAccount(address(this));
             _touchPosition(o.positionId);
 
+            int256 ctfAmount = int256(fill);
+
             if (o.side == 0) {
-                _expectedUsdc[o.maker] -= usdcAmount;
+                _expectedUsdc[o.maker] -= (volume + fee);
                 _expectedCtf[o.maker][o.positionId] += ctfAmount;
-                _expectedUsdc[address(this)] += usdcAmount;
+                _expectedUsdc[address(this)] += (volume + fee);
                 _expectedCtf[address(this)][o.positionId] -= ctfAmount;
             } else {
-                _expectedUsdc[o.maker] += usdcAmount;
+                _expectedUsdc[o.maker] += (volume - fee);
                 _expectedCtf[o.maker][o.positionId] -= ctfAmount;
-                _expectedUsdc[address(this)] -= usdcAmount;
+                _expectedUsdc[address(this)] -= (volume - fee);
                 _expectedCtf[address(this)][o.positionId] += ctfAmount;
             }
         }
@@ -233,10 +264,18 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         ICustody.BalanceDelta[] calldata usdcDeltas,
         CtfDelta[] calldata ctfDeltas
     ) private {
+        // Every account/position referenced by the deltas MUST be verified and cleared.
+        // Touch them up front: deltas pointing at accounts/positions not already touched by an
+        // order or instruction would otherwise skip the justification check below (and leak
+        // non-zero expectation state into future batches), letting the operator settle moves
+        // that no signed order backs.
         for (uint256 i = 0; i < usdcDeltas.length; i++) {
+            _touchAccount(usdcDeltas[i].account);
             _expectedUsdc[usdcDeltas[i].account] -= usdcDeltas[i].amount;
         }
         for (uint256 i = 0; i < ctfDeltas.length; i++) {
+            _touchAccount(ctfDeltas[i].account);
+            _touchPosition(ctfDeltas[i].positionId);
             _expectedCtf[ctfDeltas[i].account][ctfDeltas[i].positionId] -= ctfDeltas[i].amount;
         }
 
@@ -300,7 +339,7 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         }
 
         if (splits > 0) {
-            usdc.approve(address(ctf), splits);
+            usdc.forceApprove(address(ctf), splits);
         }
 
         for (uint256 i = 0; i < instructions.length; i++) {
@@ -318,7 +357,7 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
 
         if (merges > splits) {
             uint256 netDeposit = merges - splits;
-            usdc.approve(address(custody), netDeposit);
+            usdc.forceApprove(address(custody), netDeposit);
             custody.deposit(netDeposit);
         }
     }
