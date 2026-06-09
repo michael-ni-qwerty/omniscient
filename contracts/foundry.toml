@@ -30,8 +30,14 @@ runs = 10_000
 runs = 2048
 depth = 128
 
+[rpc_endpoints]
+amoy = "https://rpc-amoy.polygon.technology/"
+
 [fmt]
 line_length = 110
 tab_width = 4
 bracket_spacing = true
 int_types = "long"
+
+# CTF: 0x69308FB512518e39F9b16112fA8d994F4e2Bf8bB
+# Collateral token: 0x9c4E1703476E875070EE25b56A58B008CFb8FA78
