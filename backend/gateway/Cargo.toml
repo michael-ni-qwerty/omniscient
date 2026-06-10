@@ -1,0 +1,28 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+rdkafka = { workspace = true }
+futures = { workspace = true }
+crossbeam = { workspace = true }
+uuid = { workspace = true }
+alloy = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }
+hex = "0.4"

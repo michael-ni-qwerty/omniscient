@@ -1,0 +1,24 @@
+[package]
+name = "resolution"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "resolution"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+alloy = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"

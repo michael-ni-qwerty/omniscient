@@ -1,0 +1,146 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: omniscient
+      POSTGRES_PASSWORD: omniscient
+      POSTGRES_DB: omniscient
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omniscient -d omniscient"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+    networks:
+      - omniscient
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    volumes:
+      - rpdata:/var/lib/redpanda/data
+    networks:
+      - omniscient
+
+  redpanda-console:
+    image: redpandadata/console:latest
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8081:8080"
+    depends_on:
+      - redpanda
+    networks:
+      - omniscient
+
+
+  kafka-topics:
+    image: redpandadata/redpanda:latest
+    command: >
+      bash -c "
+      rpk topic create orders.matched --partitions 8 --replicas 1 --brokers redpanda:9092 || true &&
+      rpk topic create settlement.batches --partitions 4 --replicas 1 --brokers redpanda:9092 || true &&
+      rpk topic create positions.updated --partitions 4 --replicas 1 --brokers redpanda:9092 || true &&
+      rpk topic create resolution.events --partitions 4 --replicas 1 --brokers redpanda:9092 || true
+      "
+    depends_on:
+      - redpanda
+    networks:
+      - omniscient
+
+  gateway:
+    build:
+      context: ./backend
+      args:
+        - BIN=gateway
+    env_file: .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      kafka-topics:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    networks:
+      - omniscient
+    command: ["/usr/local/bin/gateway"]
+
+  settlement:
+    build:
+      context: ./backend
+      args:
+        - BIN=settlement
+    env_file: .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      kafka-topics:
+        condition: service_completed_successfully
+    networks:
+      - omniscient
+    command: ["/usr/local/bin/settlement"]
+
+  resolution:
+    build:
+      context: ./backend
+      args:
+        - BIN=resolution
+    env_file: .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      kafka-topics:
+        condition: service_completed_successfully
+    networks:
+      - omniscient
+    command: ["/usr/local/bin/resolution"]
+
+  indexer:
+    build:
+      context: ./backend
+      args:
+        - BIN=indexer
+    env_file: .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      kafka-topics:
+        condition: service_completed_successfully
+    networks:
+      - omniscient
+    command: ["/usr/local/bin/indexer"]
+
+volumes:
+  pgdata:
+  rpdata:
+
+networks:
+  omniscient:
+    driver: bridge
