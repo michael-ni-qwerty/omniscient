@@ -14,10 +14,6 @@ contract Oracle is AccessControl, Pausable {
     bytes32 public constant ARBITRATOR_ROLE = keccak256("ARBITRATOR_ROLE");
     bytes32 public constant MARKET_CREATOR_ROLE = keccak256("MARKET_CREATOR_ROLE");
 
-    enum Class {
-        B,
-        C
-    }
     enum MarketState {
         OPEN,
         EXPIRED,
@@ -27,7 +23,6 @@ contract Oracle is AccessControl, Pausable {
     }
 
     struct ResolutionSpec {
-        Class class;
         bytes32 questionId;
         uint256 outcomeSlotCount;
         uint256 expiry;
@@ -66,7 +61,7 @@ contract Oracle is AccessControl, Pausable {
     error RevealWindowPassed();
     error RevealWindowNotPassed();
 
-    event MarketCreated(bytes32 indexed marketId, Class class, bytes32 questionId, uint256 expiry);
+    event MarketCreated(bytes32 indexed marketId, bytes32 questionId, uint256 expiry);
     event OutcomeProposed(bytes32 indexed marketId, bytes32 commitment, address proposer);
     event OutcomeRevealed(bytes32 indexed marketId, uint256[] payouts);
     event OutcomeDisputed(bytes32 indexed marketId, address disputer, string reasoning);
@@ -87,7 +82,7 @@ contract Oracle is AccessControl, Pausable {
         if (specs[marketId].expiry != 0) revert InvalidState();
         ctf.prepareCondition(address(this), spec.questionId, spec.outcomeSlotCount);
         specs[marketId] = spec;
-        emit MarketCreated(marketId, spec.class, spec.questionId, spec.expiry);
+        emit MarketCreated(marketId, spec.questionId, spec.expiry);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {
@@ -98,7 +93,7 @@ contract Oracle is AccessControl, Pausable {
         _unpause();
     }
 
-    // Class B / C
+    // AI optimistic resolution: commit-reveal + bonded dispute
     function commitOutcome(bytes32 marketId, bytes32 commitment) external whenNotPaused {
         ResolutionSpec memory spec = specs[marketId];
         if (states[marketId] != MarketState.OPEN) revert InvalidState();

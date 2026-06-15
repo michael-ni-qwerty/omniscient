@@ -17,36 +17,27 @@ pub async fn handle_market_created(
     };
     let market_id_bytes = market_id.as_slice();
 
-    if log.data().data.len() < 96 {
+    if log.data().data.len() < 64 {
         warn!("MarketCreated data too short");
         return Ok(false);
     }
 
-    let class_bytes: [u8; 32] = match log.data().data[0..32].try_into() {
-        Ok(b) => b,
-        Err(_) => {
-            warn!("class bytes invalid");
-            return Err(shared::Error::Domain("class bytes invalid".into()));
-        }
-    };
-    let question_id_bytes: [u8; 32] = match log.data().data[32..64].try_into() {
+    let question_id_bytes: [u8; 32] = match log.data().data[0..32].try_into() {
         Ok(b) => b,
         Err(_) => {
             warn!("questionId bytes invalid");
             return Err(shared::Error::Domain("questionId bytes invalid".into()));
         }
     };
-    let expiry_bytes: [u8; 32] = match log.data().data[64..96].try_into() {
+    let expiry_bytes: [u8; 32] = match log.data().data[32..64].try_into() {
         Ok(b) => b,
         Err(_) => {
             warn!("expiry bytes invalid");
             return Err(shared::Error::Domain("expiry bytes invalid".into()));
         }
     };
-    let class = U256::from_be_bytes(class_bytes);
     let question_id = U256::from_be_bytes(question_id_bytes);
     let expiry = U256::from_be_bytes(expiry_bytes);
-    let class_str = if class == U256::from(0) { "B" } else { "C" };
     let expiry_i64 = i64::try_from(expiry)
         .map_err(|e| shared::Error::Domain(format!("expiry conversion error: {}", e)))?;
 
@@ -55,12 +46,11 @@ pub async fn handle_market_created(
 
     sqlx::query(
         "INSERT INTO markets (market_id, question_id, resolver_id, class, state, expiry, block_number, created_at, updated_at)
-         VALUES ($1, $2, 'oracle', $3, 'open', to_timestamp($4), $5, now(), now())
+         VALUES ($1, $2, 'ai', 'ai', 'open', to_timestamp($3), $4, now(), now())
          ON CONFLICT (market_id) DO NOTHING",
     )
     .bind(market_id_bytes)
     .bind(question_id.to_string())
-    .bind(class_str)
     .bind(expiry_i64)
     .bind(block_i64)
     .execute(&mut **tx)

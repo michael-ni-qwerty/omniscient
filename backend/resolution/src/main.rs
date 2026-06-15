@@ -6,7 +6,7 @@ use serde_json::Value;
 use shared::domain::MarketId;
 use sqlx::PgPool;
 use std::time::Duration;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 use tracing::{error as log_error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -148,10 +148,7 @@ impl Resolver for AiResolver {
             }
         }
 
-        let outcome = parsed
-            .get("outcome")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u8;
+        let outcome = parsed.get("outcome").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
         let payouts = vec![100 - outcome as u64, outcome as u64];
 
         Ok(ResolutionProposal {
@@ -159,49 +156,11 @@ impl Resolver for AiResolver {
             payouts,
             evidence: evidence_urls
                 .into_iter()
-                .map(|url| EvidenceItem { url, verified: true })
+                .map(|url| EvidenceItem {
+                    url,
+                    verified: true,
+                })
                 .collect(),
-            confidence,
-        })
-    }
-}
-
-struct ApiResolver;
-
-#[async_trait]
-impl Resolver for ApiResolver {
-    fn id(&self) -> &'static str {
-        "api"
-    }
-
-    async fn validate_spec(&self, spec: &ResolutionSpec) -> Result<(), SpecError> {
-        if !spec.resolver_id.starts_with("api.") {
-            return Err(SpecError::Invalid("resolver_id must start with 'api.'".into()));
-        }
-        Ok(())
-    }
-
-    async fn resolve(&self, _market: &ExpiredMarket) -> Result<ResolutionProposal, ResolveError> {
-        let client = reqwest::Client::new();
-        let response = client
-            .get("https://api.example.com/result")
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(ResolveError::Fallback);
-        }
-
-        let json: Value = response.json().await?;
-        let outcome = json.get("outcome").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-        let confidence = json.get("confidence").and_then(|v| v.as_u64()).unwrap_or(100) as u8;
-        let payouts = vec![100 - outcome as u64, outcome as u64];
-
-        Ok(ResolutionProposal {
-            outcome,
-            payouts,
-            evidence: vec![],
             confidence,
         })
     }
@@ -221,16 +180,10 @@ async fn main() -> anyhow::Result<()> {
         api_url: config.llm_api_url.clone(),
         api_key: config.llm_api_key.clone(),
     };
-    let api = ApiResolver;
 
     let pool2 = pool.clone();
     let expiry_handle = tokio::spawn(async move {
-        expiry_watcher(pool2, &ai, &api).await;
-    });
-
-    let pool3 = pool.clone();
-    let reveal_handle = tokio::spawn(async move {
-        commit_reveal_loop(pool3).await;
+        expiry_watcher(pool2, &ai).await;
     });
 
     tokio::select! {
@@ -238,13 +191,12 @@ async fn main() -> anyhow::Result<()> {
             info!("received SIGTERM, shutting down resolution service");
         }
         _ = expiry_handle => {}
-        _ = reveal_handle => {}
     }
 
     Ok(())
 }
 
-async fn expiry_watcher(pool: PgPool, ai: &AiResolver, api: &ApiResolver) {
+async fn expiry_watcher(pool: PgPool, ai: &AiResolver) {
     let mut ticker = interval(Duration::from_secs(10));
     loop {
         ticker.tick().await;
@@ -305,8 +257,6 @@ async fn expiry_watcher(pool: PgPool, ai: &AiResolver, api: &ApiResolver) {
 
             let proposal = if resolver_id == "ai" {
                 ai.resolve(&market).await
-            } else if resolver_id.starts_with("api.") {
-                api.resolve(&market).await
             } else {
                 Err(ResolveError::Fallback)
             };
@@ -357,111 +307,11 @@ async fn expiry_watcher(pool: PgPool, ai: &AiResolver, api: &ApiResolver) {
     }
 }
 
-async fn commit_reveal_loop(pool: PgPool) {
-    let mut ticker = interval(Duration::from_secs(30));
-    loop {
-        ticker.tick().await;
-
-        let rows = match sqlx::query_as::<_, (Vec<u8>, Vec<u8>, Option<Vec<i64>>)>(
-            "SELECT market_id, commitment, proposed_payouts
-             FROM resolution_proposals
-             WHERE status = 'pending' AND commitment IS NOT NULL",
-        )
-        .fetch_all(&pool)
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                log_error!("commit query error: {}", e);
-                continue;
-            }
-        };
-
-        for (market_id_bytes, _commitment, _payouts_opt) in rows {
-            info!(
-                "would commit outcome for market {}",
-                hex::encode(&market_id_bytes)
-            );
-
-            let mut tx = match pool.begin().await {
-                Ok(t) => t,
-                Err(e) => {
-                    log_error!("tx begin error: {}", e);
-                    continue;
-                }
-            };
-
-            let _ = sqlx::query(
-                "UPDATE resolution_proposals
-                 SET status = 'committed', committed_at = now()
-                 WHERE market_id = $1",
-            )
-            .bind(&market_id_bytes)
-            .execute(&mut *tx)
-            .await;
-
-            if let Err(e) = tx.commit().await {
-                log_error!("tx commit error: {}", e);
-                continue;
-            }
-
-            sleep(Duration::from_secs(300)).await;
-
-            let mut tx = match pool.begin().await {
-                Ok(t) => t,
-                Err(e) => {
-                    log_error!("tx begin error: {}", e);
-                    continue;
-                }
-            };
-
-            let _ = sqlx::query(
-                "UPDATE resolution_proposals
-                 SET status = 'revealed', revealed_at = now()
-                 WHERE market_id = $1",
-            )
-            .bind(&market_id_bytes)
-            .execute(&mut *tx)
-            .await;
-
-            if let Err(e) = tx.commit().await {
-                log_error!("tx commit error: {}", e);
-                continue;
-            }
-
-            sleep(Duration::from_secs(3600)).await;
-
-            let mut tx = match pool.begin().await {
-                Ok(t) => t,
-                Err(e) => {
-                    log_error!("tx begin error: {}", e);
-                    continue;
-                }
-            };
-
-            let _ = sqlx::query(
-                "UPDATE resolution_proposals
-                 SET status = 'resolved', finalized_at = now()
-                 WHERE market_id = $1",
-            )
-            .bind(&market_id_bytes)
-            .execute(&mut *tx)
-            .await;
-
-            let _ = sqlx::query(
-                "UPDATE markets SET state = 'resolved', updated_at = now()
-                 WHERE market_id = $1",
-            )
-            .bind(&market_id_bytes)
-            .execute(&mut *tx)
-            .await;
-
-            if let Err(e) = tx.commit().await {
-                log_error!("tx commit error: {}", e);
-            }
-        }
-    }
-}
+// NOTE: On-chain commit/reveal is deferred. The AI produces a `pending` proposal +
+// commitment here; the real lifecycle (committed -> revealed -> disputed -> resolved)
+// is driven by on-chain Oracle events that the indexer reconciles into
+// `resolution_proposals`. The on-chain submission (alloy tx -> Oracle.commitOutcome/
+// revealOutcome) is the documented post-MVP seam and is intentionally NOT faked here.
 
 fn compute_commitment(market_id: &MarketId, payouts: &[u64]) -> B256 {
     let mut data = Vec::new();

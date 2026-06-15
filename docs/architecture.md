@@ -74,7 +74,7 @@ The Settlement Service is the operator-controlled worker responsible for bridgin
 
 ## 3. Resolution Service
 
-The Resolution Service operates as an asynchronous worker that manages market finalization through the resolver registry, implementing AI optimistic-oracle proposals (and deferred post-MVP: Pyth on-chain auto-finalize).
+The Resolution Service operates as an asynchronous worker that manages market finalization through the resolver registry. **MVP is AI-only:** every market binds to the AI optimistic-oracle resolver. Deterministic on-chain sources (Pyth auto-finalize) and trusted-API sources are deferred post-MVP behind the same `Resolver` trait.
 
 ```text
       +--------------------+
@@ -90,9 +90,9 @@ The Resolution Service operates as an asynchronous worker that manages market fi
 |                                                       |
 |  +-------------------+        +--------------------+  |
 |  | Resolver Registry |        | Commit-Reveal Loop |  |
-|  | - Class B (API)    |=======>| - Generate hash    |  |
-|  | - Class C (AI)     |  IPC   | - Manage dispute   |  |
-|  | - Class A (Pyth)   |deferred|                    |  |
+|  | - AI (MVP)         |=======>| - Generate hash    |  |
+|  | - API (deferred)   |  IPC   | - Manage dispute   |  |
+|  | - Pyth (deferred)  |deferred|                    |  |
 |  +-------------------+        +---------+----------+  |
 |                                         |             |
 +-----------------------------------------|-------------+
@@ -105,7 +105,7 @@ The Resolution Service operates as an asynchronous worker that manages market fi
 ```
 
 ### Key Responsibilities
-- **Resolver Registry Dispatch:** Dynamically routes expired markets to specialized handlers (Class B/C optimistic off-chain) mapped inside a unified `Resolver` abstraction. Class A (Pyth) is deferred post-MVP.
+- **Resolver Registry Dispatch:** Routes expired markets to the **AI optimistic resolver** (MVP) inside a unified `Resolver` abstraction. Deterministic on-chain (Pyth) and trusted-API resolvers are deferred post-MVP behind the same trait.
 - **On-Chain Proof Sourcing (post-MVP):** Would fetch historical Pyth Benchmark payloads on-demand at exact expiry intervals to pass to the Oracle's on-chain verifiers.
 - **AI Claim Synthesis:** Directs LLM prompts, parses structured proposals, and verifies cited source URLs to generate cryptographic proof bundles.
 - **Commit-Reveal Execution:** Generates commit hashes, schedules revealed payloads, and monitors active challenge/dispute windows.

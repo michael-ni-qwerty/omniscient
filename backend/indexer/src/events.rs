@@ -24,7 +24,10 @@ define_topic!(
     FORCED_WITHDRAWAL_REQUESTED,
     "ForcedWithdrawalRequested(address,uint256)"
 );
-define_topic!(FORCED_WITHDRAWAL_CANCELLED, "ForcedWithdrawalCancelled(address)");
+define_topic!(
+    FORCED_WITHDRAWAL_CANCELLED,
+    "ForcedWithdrawalCancelled(address)"
+);
 define_topic!(
     FORCED_WITHDRAWAL_EXECUTED,
     "ForcedWithdrawalExecuted(address,address,uint256)"
@@ -33,12 +36,15 @@ define_topic!(
     FORCED_WITHDRAWAL_DELAY_UPDATED,
     "ForcedWithdrawalDelayUpdated(uint256,uint256)"
 );
-define_topic!(SIGNER_APPROVAL_SET, "SignerApprovalSet(address,address,bool)");
+define_topic!(
+    SIGNER_APPROVAL_SET,
+    "SignerApprovalSet(address,address,bool)"
+);
 define_topic!(FEE_RATES_UPDATED, "FeeRatesUpdated(uint256,uint256)");
 define_topic!(NET_DELTAS_APPLIED, "NetDeltasApplied(bytes32,uint256)");
 define_topic!(NONCE_INVALIDATED, "NonceInvalidated(address,uint256)");
 define_topic!(OUTCOME_RESOLVED, "OutcomeResolved(bytes32,uint256[])");
-define_topic!(MARKET_CREATED, "MarketCreated(bytes32,uint8,bytes32,uint256)");
+define_topic!(MARKET_CREATED, "MarketCreated(bytes32,bytes32,uint256)");
 define_topic!(OUTCOME_PROPOSED, "OutcomeProposed(bytes32,bytes32,address)");
 define_topic!(OUTCOME_REVEALED, "OutcomeRevealed(bytes32,uint256[])");
 define_topic!(OUTCOME_DISPUTED, "OutcomeDisputed(bytes32,address,string)");
@@ -92,10 +98,7 @@ pub async fn dispatch(
     } else if *topic0 == *DISPUTE_RESOLVED {
         oracle::handle_dispute_resolved(tx, log, ctx).await
     } else {
-        warn!(
-            "unknown event topic0: {}",
-            topic0
-        );
+        warn!("unknown event topic0: {}", topic0);
         Ok(false)
     }
 }

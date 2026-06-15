@@ -94,7 +94,6 @@ contract OracleTest is Test {
 
     function _specBC() internal pure returns (Oracle.ResolutionSpec memory) {
         return Oracle.ResolutionSpec({
-            class: Oracle.Class.B,
             questionId: Q_BC,
             outcomeSlotCount: 2,
             expiry: EXPIRY,
@@ -133,8 +132,8 @@ contract OracleTest is Test {
     function test_CreateMarket_Success() public {
         _createBC();
         assertTrue(ctf.prepared(Q_BC));
-        (Oracle.Class c,,,,,,,) = oracle.specs(MARKET_BC);
-        assertEq(uint256(c), uint256(Oracle.Class.B));
+        (bytes32 qid,,,,,,) = oracle.specs(MARKET_BC);
+        assertEq(qid, Q_BC);
     }
 
     function test_CreateMarket_RevertDuplicate() public {

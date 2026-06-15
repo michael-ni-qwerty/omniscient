@@ -14,7 +14,7 @@ CREATE TABLE markets (
     condition_id BYTEA CHECK (octet_length(condition_id) = 32),
     question_id BYTEA NOT NULL CHECK (octet_length(question_id) = 32),
     resolver_id TEXT NOT NULL,
-    class TEXT NOT NULL CHECK (class IN ('A', 'B', 'C')),
+    class TEXT NOT NULL DEFAULT 'ai' CHECK (class = 'ai'),
     state TEXT NOT NULL CHECK (state IN ('open','halted','expired','proposed','disputed','resolved','settled','redeemable')),
     expiry TIMESTAMPTZ,
     outcome_slot_count INT NOT NULL DEFAULT 2 CHECK (outcome_slot_count >= 2),

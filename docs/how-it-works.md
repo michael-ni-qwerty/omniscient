@@ -224,10 +224,9 @@ sequenceDiagram
 
 The Resolution Service dispatches the expired market through the **resolver registry** by its `resolver_id`. See Part 3 for the full model. Summary of the happy path:
 
-- **Class A (e.g. Pyth):** deferred post-MVP. Would fetch the Benchmark price at expiry and verify on-chain via `parsePriceFeedUpdates` → deterministic, on-chain-proven → **auto-finalize**.
-- **Class B (trusted data API):** deterministic parse → commit-reveal + **full bonded dispute window**.
-- **Class C (AI proposer):** LLM proposes outcome + confidence + evidence, **fetches and verifies cited sources**, commits the intent hash on-chain, reveals, then rides the bonded dispute window.
-- **MVP:** only **Class B and Class C** are wired on-chain. Both use the same commit-reveal + dispute path.
+- **AI proposer (MVP):** the LLM proposes outcome + confidence + evidence, **fetches and verifies cited sources**, commits the intent hash on-chain, reveals, then rides the bonded dispute window.
+- **Deferred post-MVP:** deterministic on-chain sources (e.g. Pyth Benchmarks via `parsePriceFeedUpdates` → auto-finalize) and trusted-API sources. They plug in behind the same `Resolver` trait but are **not** wired in the MVP.
+- **MVP:** every market binds to the **AI resolver**; resolution is the single commit-reveal + dispute path.
 
 On the happy path, the dispute window passes with **no dispute** → the Oracle finalizes the outcome and sets it on the CTF. Market: `proposed → resolved → settled`.
 
@@ -331,11 +330,11 @@ flowchart TB
 
 ### Verification classes (drives the finalization path)
 
-| Class | Meaning | Examples | Finalization | AI? |
+| Resolver | Meaning | Examples | Finalization | MVP? |
 |---|---|---|---|---|
-| **A** | Cryptographically verifiable **on-chain** | Pyth Benchmarks (`parsePriceFeedUpdates`) | **Auto-finalize** — proof checked on-chain, dispute window may be near-zero | none |
-| **B** | Single **trusted off-chain** source, deterministic parse | Weather API, sports/official-results API *(examples — not implemented)* | Commit-reveal + **full bonded dispute window** (source not on-chain-provable) | none |
-| **C** | Open-ended fact, no structured source | LLM proposer | Commit-reveal + full bonded dispute window + mandatory source-fetch/verify | proposer only |
+| **AI** | Open-ended fact, no structured source | LLM proposer | Commit-reveal + full bonded dispute window + mandatory source-fetch/verify | **wired (MVP)** |
+| On-chain (deferred) | Cryptographically verifiable **on-chain** | Pyth Benchmarks (`parsePriceFeedUpdates`) | Auto-finalize — proof checked on-chain | deferred post-MVP |
+| Trusted API (deferred) | Single **trusted off-chain** source, deterministic parse | Weather / sports-results API | Commit-reveal + bonded dispute window | deferred post-MVP |
 
 ### The `Resolver` abstraction
 
