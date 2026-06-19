@@ -23,16 +23,16 @@ It fixes four problems with existing platforms:
 
 ## Part 1 — The Cast (components in one line each)
 
-| Zone                    | Component                                                    | One-line role                                                                                      |
-| -------------------------| --------------------------------------------------------------| ----------------------------------------------------------------------------------------------------|
-| **Untrusted**           | Web UI / dApp                                                | User wallet; signs EIP-712 orders; submits/queries; renders live feed.                             |
-| **Operator (Rust)**     | Gateway (Order API + Matching Engine)                        | Verifies signed orders, holds collateral, matches off-chain (single-writer per market).            |
-| **Operator (Rust)**     | Settlement Service                                           | Consumes matches, nets position deltas, submits batched on-chain txs, waits for finality.          |
-| **Operator (Rust)**     | Resolution Service                                           | On market expiry, dispatches to a resolver (data API / AI) and drives commit-reveal.               |
-| **Operator (Rust)**     | Chain Indexer                                                | The **only** path back from finalized chain state → off-chain (credits, finality, reorg rollback). |
-| **Tooling**             | Redpanda                                                     | Durable event log (Kafka API) — durability, replay, decoupling, audit. **Not** throughput.         |
-| **Tooling**             | Postgres                                                     | Operational store: open orders, holds, nonces, batch state, audit. Never the fund authority.       |
-| **Trustless (Polygon)** | Custody/Vault, Settlement Exchange, Gnosis CTF, Oracle        | Hold USDC, apply net deltas, mint/redeem outcome tokens, commit-reveal resolution.                 |
+| Zone                    | Component                                              | One-line role                                                                                      |
+| -------------------------| --------------------------------------------------------| ----------------------------------------------------------------------------------------------------|
+| **Untrusted**           | Web UI / dApp                                          | User wallet; signs EIP-712 orders; submits/queries; renders live feed.                             |
+| **Operator (Rust)**     | Gateway (Order API + Matching Engine)                  | Verifies signed orders, holds collateral, matches off-chain (single-writer per market).            |
+| **Operator (Rust)**     | Settlement Service                                     | Consumes matches, nets position deltas, submits batched on-chain txs, waits for finality.          |
+| **Operator (Rust)**     | Resolution Service                                     | On market expiry, dispatches to a resolver (data API / AI) and drives commit-reveal.               |
+| **Operator (Rust)**     | Chain Indexer                                          | The **only** path back from finalized chain state → off-chain (credits, finality, reorg rollback). |
+| **Tooling**             | Redpanda                                               | Durable event log (Kafka API) — durability, replay, decoupling, audit. **Not** throughput.         |
+| **Tooling**             | Postgres                                               | Operational store: open orders, holds, nonces, batch state, audit. Never the fund authority.       |
+| **Trustless (Polygon)** | Custody/Vault, Settlement Exchange, Gnosis CTF, Oracle | Hold USDC, apply net deltas, mint/redeem outcome tokens, commit-reveal resolution.                 |
 
 **Two invariants the topology enforces:**
 

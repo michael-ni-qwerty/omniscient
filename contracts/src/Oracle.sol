@@ -16,7 +16,6 @@ contract Oracle is AccessControl, Pausable {
 
     enum MarketState {
         OPEN,
-        EXPIRED,
         PROPOSED,
         DISPUTED,
         RESOLVED
@@ -26,20 +25,15 @@ contract Oracle is AccessControl, Pausable {
         bytes32 questionId;
         uint256 outcomeSlotCount;
         uint256 expiry;
-        uint256 revealWindow;
         uint256 disputeWindow;
-        uint256 proposerBondAmount;
-        uint256 disputeBondAmount;
+        uint256 bondAmount;
     }
 
     struct OptimisticState {
-        bytes32 commitment;
-        uint256[] proposedPayouts;
+        bytes32 proposedPayoutsHash;
         uint256 proposeTime;
-        uint256 revealTime;
         address proposer;
         address disputer;
-        bool revealed;
     }
 
     IConditionalTokens public immutable ctf;
@@ -51,19 +45,13 @@ contract Oracle is AccessControl, Pausable {
 
     error InvalidState();
     error NotExpired();
-    error Disputed();
     error DisputeWindowNotPassed();
     error DisputeWindowPassed();
-    error NotRevealed();
-    error AlreadyRevealed();
-    error InvalidCommitment();
     error InvalidPayouts();
-    error RevealWindowPassed();
-    error RevealWindowNotPassed();
+    error PayoutsMismatch();
 
     event MarketCreated(bytes32 indexed marketId, bytes32 questionId, uint256 expiry);
-    event OutcomeProposed(bytes32 indexed marketId, bytes32 commitment, address proposer);
-    event OutcomeRevealed(bytes32 indexed marketId, uint256[] payouts);
+    event OutcomeProposed(bytes32 indexed marketId, address proposer, uint256[] payouts);
     event OutcomeDisputed(bytes32 indexed marketId, address disputer, string reasoning);
     event OutcomeResolved(bytes32 indexed marketId, uint256[] payouts);
     event DisputeResolved(bytes32 indexed marketId, uint256[] payouts);
@@ -93,48 +81,22 @@ contract Oracle is AccessControl, Pausable {
         _unpause();
     }
 
-    // AI optimistic resolution: commit-reveal + bonded dispute
-    function commitOutcome(bytes32 marketId, bytes32 commitment) external whenNotPaused {
+    // AI optimistic resolution: plaintext propose + bonded dispute (MVP: no commit-reveal).
+    function proposeOutcome(bytes32 marketId, uint256[] calldata payouts) external whenNotPaused {
         ResolutionSpec memory spec = specs[marketId];
         if (states[marketId] != MarketState.OPEN) revert InvalidState();
         if (block.timestamp < spec.expiry) revert NotExpired();
+        _validatePayouts(spec, payouts);
 
-        usdc.safeTransferFrom(msg.sender, address(this), spec.proposerBondAmount);
+        usdc.safeTransferFrom(msg.sender, address(this), spec.bondAmount);
 
         states[marketId] = MarketState.PROPOSED;
         OptimisticState storage os = optimisticStates[marketId];
-        os.commitment = commitment;
+        os.proposedPayoutsHash = keccak256(abi.encode(payouts));
         os.proposer = msg.sender;
         os.proposeTime = block.timestamp;
 
-        emit OutcomeProposed(marketId, commitment, msg.sender);
-    }
-
-    function revealOutcome(bytes32 marketId, uint256[] calldata payouts, bytes32 salt)
-        external
-        whenNotPaused
-    {
-        if (states[marketId] != MarketState.PROPOSED) revert InvalidState();
-        ResolutionSpec memory spec = specs[marketId];
-        OptimisticState storage os = optimisticStates[marketId];
-        if (os.revealed) revert AlreadyRevealed();
-        if (block.timestamp > os.proposeTime + spec.revealWindow) revert RevealWindowPassed();
-
-        if (payouts.length != spec.outcomeSlotCount) revert InvalidPayouts();
-        uint256 sum;
-        for (uint256 i = 0; i < payouts.length; i++) {
-            sum += payouts[i];
-        }
-        if (sum == 0) revert InvalidPayouts();
-
-        bytes32 expectedCommitment = keccak256(abi.encode(marketId, payouts, salt));
-        if (os.commitment != expectedCommitment) revert InvalidCommitment();
-
-        os.proposedPayouts = payouts;
-        os.revealed = true;
-        os.revealTime = block.timestamp;
-
-        emit OutcomeRevealed(marketId, payouts);
+        emit OutcomeProposed(marketId, msg.sender, payouts);
     }
 
     function disputeOutcome(bytes32 marketId, string calldata reasoning) external whenNotPaused {
@@ -142,11 +104,10 @@ contract Oracle is AccessControl, Pausable {
         ResolutionSpec memory spec = specs[marketId];
         OptimisticState storage os = optimisticStates[marketId];
 
-        if (!os.revealed) revert NotRevealed();
-        // Dispute window starts at REVEAL, not propose: payouts are only public after reveal.
-        if (block.timestamp > os.revealTime + spec.disputeWindow) revert DisputeWindowPassed();
+        // Dispute window runs from propose: payouts are public from the proposal.
+        if (block.timestamp > os.proposeTime + spec.disputeWindow) revert DisputeWindowPassed();
 
-        usdc.safeTransferFrom(msg.sender, address(this), spec.disputeBondAmount);
+        usdc.safeTransferFrom(msg.sender, address(this), spec.bondAmount);
 
         states[marketId] = MarketState.DISPUTED;
         os.disputer = msg.sender;
@@ -160,67 +121,41 @@ contract Oracle is AccessControl, Pausable {
         ResolutionSpec memory spec = specs[marketId];
         OptimisticState storage os = optimisticStates[marketId];
 
+        _validatePayouts(spec, payouts);
+
+        bool disputerRight = keccak256(abi.encode(payouts)) != os.proposedPayoutsHash;
+        address winner = disputerRight ? os.disputer : os.proposer;
+
+        states[marketId] = MarketState.RESOLVED;
+        ctf.reportPayouts(spec.questionId, payouts);
+        usdc.safeTransfer(winner, 2 * spec.bondAmount);
+
+        emit DisputeResolved(marketId, payouts);
+    }
+
+    function finalizeOutcome(bytes32 marketId, uint256[] calldata payouts) external whenNotPaused {
+        if (states[marketId] != MarketState.PROPOSED) revert InvalidState();
+        ResolutionSpec memory spec = specs[marketId];
+        OptimisticState storage os = optimisticStates[marketId];
+
+        if (block.timestamp <= os.proposeTime + spec.disputeWindow) revert DisputeWindowNotPassed();
+        // Hash binds these payouts to the already-validated proposal; no re-validation needed.
+        if (keccak256(abi.encode(payouts)) != os.proposedPayoutsHash) revert PayoutsMismatch();
+
+        states[marketId] = MarketState.RESOLVED;
+        ctf.reportPayouts(spec.questionId, payouts);
+
+        usdc.safeTransfer(os.proposer, spec.bondAmount);
+
+        emit OutcomeResolved(marketId, payouts);
+    }
+
+    function _validatePayouts(ResolutionSpec memory spec, uint256[] calldata payouts) internal pure {
         if (payouts.length != spec.outcomeSlotCount) revert InvalidPayouts();
         uint256 sum;
         for (uint256 i = 0; i < payouts.length; i++) {
             sum += payouts[i];
         }
         if (sum == 0) revert InvalidPayouts();
-
-        bool disputerRight;
-        if (payouts.length != os.proposedPayouts.length) {
-            disputerRight = true;
-        } else {
-            for (uint256 i = 0; i < payouts.length; i++) {
-                if (payouts[i] != os.proposedPayouts[i]) {
-                    disputerRight = true;
-                    break;
-                }
-            }
-        }
-
-        if (disputerRight) {
-            usdc.safeTransfer(os.disputer, spec.disputeBondAmount + spec.proposerBondAmount);
-        } else {
-            usdc.safeTransfer(os.proposer, spec.disputeBondAmount + spec.proposerBondAmount);
-        }
-
-        states[marketId] = MarketState.RESOLVED;
-        ctf.reportPayouts(spec.questionId, payouts);
-
-        emit DisputeResolved(marketId, payouts);
-    }
-
-    function finalizeOutcome(bytes32 marketId) external whenNotPaused {
-        if (states[marketId] != MarketState.PROPOSED) revert InvalidState();
-        ResolutionSpec memory spec = specs[marketId];
-        OptimisticState storage os = optimisticStates[marketId];
-
-        if (!os.revealed) revert NotRevealed();
-        if (block.timestamp <= os.revealTime + spec.disputeWindow) revert DisputeWindowNotPassed();
-
-        states[marketId] = MarketState.RESOLVED;
-        ctf.reportPayouts(spec.questionId, os.proposedPayouts);
-
-        usdc.safeTransfer(os.proposer, spec.proposerBondAmount);
-
-        emit OutcomeResolved(marketId, os.proposedPayouts);
-    }
-
-    function slashNoReveal(bytes32 marketId) external whenNotPaused {
-        if (states[marketId] != MarketState.PROPOSED) revert InvalidState();
-        ResolutionSpec memory spec = specs[marketId];
-        OptimisticState storage os = optimisticStates[marketId];
-
-        if (os.revealed) revert AlreadyRevealed();
-        if (block.timestamp <= os.proposeTime + spec.revealWindow) revert RevealWindowNotPassed();
-
-        // Slash the absent proposer's bond to the caller and RE-OPEN the market for a new
-        // proposal. Leaving it EXPIRED would be a terminal trap that locks CTF positions forever.
-        usdc.safeTransfer(msg.sender, spec.proposerBondAmount);
-        states[marketId] = MarketState.OPEN;
-        delete optimisticStates[marketId];
-
-        emit OutcomeResolved(marketId, new uint256[](0));
     }
 }

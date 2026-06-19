@@ -10,7 +10,7 @@ import { MockUSDC } from "./mocks/MockUSDC.sol";
 ///      Every action is bounded so calls never revert (fail_on_revert = true).
 contract CustodyHandler is Test {
     bytes32 private constant WITHDRAWAL_TYPEHASH =
-        keccak256("Withdrawal(address account,uint256 amount,address to,uint256 nonce,uint256 deadline)");
+        keccak256("Withdrawal(address account,uint256 amount,uint256 nonce,uint256 deadline)");
 
     Custody public immutable custody;
     MockUSDC public immutable usdc;
@@ -51,11 +51,11 @@ contract CustodyHandler is Test {
         amount = bound(amount, 1, bal);
         uint256 deadline = block.timestamp + 1;
         uint256 nonce = custody.withdrawalNonce(actor);
-        bytes32 structHash = keccak256(abi.encode(WITHDRAWAL_TYPEHASH, actor, amount, actor, nonce, deadline));
+        bytes32 structHash = keccak256(abi.encode(WITHDRAWAL_TYPEHASH, actor, amount, nonce, deadline));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", custody.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorPk, digest);
         vm.prank(actor);
-        custody.withdraw(amount, actor, deadline, abi.encodePacked(r, s, v));
+        custody.withdraw(amount, deadline, abi.encodePacked(r, s, v));
         ghostWithdrawn += amount;
     }
 
@@ -77,11 +77,9 @@ contract CustodyHandler is Test {
         address actor = _actor(actorSeed);
         uint256 bal = custody.balanceOf(actor);
         if (bal == 0) return;
-        if (custody.forcedWithdrawalReadyAt(actor) == 0) {
-            vm.prank(actor);
-            custody.requestForcedWithdrawal();
-        }
-        vm.warp(block.timestamp + custody.forcedWithdrawalDelay());
+        // Warp past the operator-inactivity threshold so the hatch is provably open
+        // (no operator activity occurs within this call).
+        vm.warp(block.timestamp + custody.operatorInactivityThreshold() + 1);
         vm.prank(actor);
         custody.executeForcedWithdrawal(actor);
         ghostWithdrawn += bal;
@@ -122,20 +120,24 @@ contract CustodyInvariantTest is Test {
         targetContract(address(handler));
     }
 
-    /// CORE: USDC held == credited == sum of all balances. No path creates or destroys value.
+    /// CORE: USDC held == sum of all balances. No path creates or destroys value.
     function invariant_Conservation() public view {
         uint256 sum;
         uint256 n = handler.actorCount();
         for (uint256 i; i < n; ++i) {
             sum += custody.balanceOf(handler.actorAt(i));
         }
-        assertEq(custody.totalCredited(), sum, "totalCredited != sum(balances)");
-        assertEq(usdc.balanceOf(address(custody)), custody.totalCredited(), "USDC held != totalCredited");
+        assertEq(usdc.balanceOf(address(custody)), sum, "USDC held != sum(balances)");
     }
 
     function invariant_LedgerMatchesFlows() public view {
+        uint256 sum;
+        uint256 n = handler.actorCount();
+        for (uint256 i; i < n; ++i) {
+            sum += custody.balanceOf(handler.actorAt(i));
+        }
         assertEq(
-            custody.totalCredited(),
+            sum,
             handler.ghostDeposited() - handler.ghostWithdrawn(),
             "ledger != deposited - withdrawn"
         );
