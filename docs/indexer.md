@@ -67,10 +67,7 @@ Single transaction deleting all unfinalized state from `block_number` onward:
 - `reorg_checkpoints` (unfinalized)
 - `indexed_logs`
 - `balances`
-- `order_cancellations`
 - `markets`
-- `settlement_batches`
-- `resolution_proposals`
 
 ## Event Dispatch (`events.rs`)
 
@@ -86,7 +83,6 @@ Topic-hash matching against known event signatures. Each match calls the corresp
 | `OperatorHeartbeat(uint256)` | `custody::handle_operator_heartbeat` | Custody |
 | `OperatorInactivityThresholdUpdated(uint256)` | `custody::handle_operator_inactivity_threshold_updated` | Custody |
 | `FeeRatesUpdated(uint256,uint256)` | `custody::handle_fee_rates_updated` | SettlementExchange |
-| `NetDeltasApplied(bytes32,uint256)` | `settlement::handle_net_deltas_applied` | Custody |
 | `NonceInvalidated(address,uint256)` | `settlement::handle_nonce_invalidated` | SettlementExchange |
 | `MarketCreated(bytes32,bytes32,uint256)` | `oracle::handle_market_created` | Oracle |
 | `OutcomeProposed(bytes32,address,uint256[])` | `oracle::handle_outcome_proposed` | Oracle |

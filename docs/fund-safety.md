@@ -12,7 +12,7 @@
 
 - **Settlement idempotency:** per-batch `batchId` + on-chain dedup (`_settledBatches` in `SettlementExchange`, `_appliedBatches` in `Custody`) so a retry cannot double-apply.
 
-- **Backpressure:** bounded settlement backlog (batch size 50 or 5s timer); slow/halt matching rather than let pre-settlement state diverge unbounded.
+- **Backpressure:** bounded backlog; slow/halt matching rather than let pre-settlement state diverge unbounded.
 
 - **Canonical time:** expiry and dispute windows key off **on-chain block timestamp**, not the scheduler clock.
 
@@ -22,23 +22,21 @@
 |---|---|---|
 | Balances / collateral | Gateway holds (Postgres `balances`) | Custody contract (via Indexer, post-finality) |
 | Fills / positions | `orders.matched` (WS, provisional) | SettlementExchange / CTF (post-finality) |
-| Market outcome | Resolver proposal (DB `resolution_proposals`) | Oracle contract — post dispute window or arbitrator resolution |
+| Market outcome | Oracle events (via Indexer) | Oracle contract — post dispute window or arbitrator resolution |
 | Order book | In-memory (matcher thread) | Rebuilt from snapshot + replay-from-offset |
-| Settlement batches | Settlement Service (Postgres `settlement_batches`) | On-chain `BatchSettled` event (via Indexer) |
 
 ## Reorg Handling
 
 The Indexer tracks `reorg_checkpoints` for every processed block. On finalization (`current_block - block_num >= 12`), it compares the stored block hash against the RPC. On mismatch:
 
-1. `rollback_unfinalized(block_num)` deletes: `reorg_checkpoints`, `indexed_logs`, `balances`, `order_cancellations`, `markets`, `settlement_batches` — all rows with `block_number >= block_num`.
+1. `rollback_unfinalized(block_num)` deletes: `reorg_checkpoints`, `indexed_logs`, `balances`, `markets` — all rows with `block_number >= block_num`.
 2. Cursor is not advanced; the block is reprocessed on the next poll cycle.
 
 Pre-finality state is never treated as authoritative. Clients render pre-settlement matches as **provisional**.
 
 ## Crash Recovery
 
-- In-memory order book: rebuildable via periodic snapshot + replay-from-offset (Postgres `matcher_snapshots` table with `kafka_offset`).
-- Settlement batches: `settlement_batches` table tracks `pending → submitted → finalized` with `tx_hash`; idempotent on-chain application prevents double-apply after restart.
+- In-memory order book: rebuildable via replay-from-offset (Redpanda `kafka_offset`); open orders persisted in `orders` table.
 - Indexer: `indexer_cursors` + `indexed_logs` provide idempotent reprocessing.
 
 ## Trust Boundaries
@@ -98,14 +96,11 @@ flowchart LR
 
 | Topic | Partitions | Producer | Consumers | Key |
 |---|---|---|---|---|
-| `orders.matched` | 8 | Gateway (matcher) | Settlement, Gateway (WS) | `market_id` |
-| `settlement.batches` | 4 | Settlement | Indexer, audit | `batch_id` |
-| `positions.updated` | 4 | Settlement | Indexer, Gateway | `user_id` |
-| `resolution.events` | 4 | Resolution | Indexer, audit | `market_id` |
+| `orders.matched` | 8 | Gateway (matcher) | Gateway (WS) | `market_id` |
 
 All payloads carry `schema_version` via `shared::kafka::payload_with_version`. Offsets committed **after** processing. `enable.auto.commit = false`.
 
-⚠️ **INVARIANT:** broker exactly-once is **within-broker only** — it does not extend across the settlement→chain boundary. On-chain idempotency (`_settledBatches`, `_appliedBatches`) is the dedup boundary.
+⚠️ **INVARIANT:** broker exactly-once is **within-broker only** — it does not extend across the chain boundary. On-chain idempotency (`_settledBatches`, `_appliedBatches`) is the dedup boundary.
 
 ## Compliance
 

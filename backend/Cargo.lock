@@ -3354,22 +3354,6 @@ dependencies = [
 [[package]]
 name = "resolution"
 version = "0.1.0"
-dependencies = [
- "alloy",
- "anyhow",
- "async-trait",
- "chrono",
- "dotenvy",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "shared",
- "sqlx",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "rfc6979"
@@ -3753,22 +3737,6 @@ dependencies = [
 [[package]]
 name = "settlement"
 version = "0.1.0"
-dependencies = [
- "alloy",
- "anyhow",
- "chrono",
- "dotenvy",
- "futures",
- "hex",
- "rdkafka",
- "reqwest",
- "serde",
- "serde_json",
- "shared",
- "sqlx",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "sha1"

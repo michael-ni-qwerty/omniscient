@@ -21,22 +21,7 @@ pub async fn rollback_unfinalized(pool: &PgPool, from_block: u64) -> Result<(), 
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query("DELETE FROM order_cancellations WHERE block_number >= $1")
-        .bind(from_i64)
-        .execute(&mut *tx)
-        .await?;
-
     sqlx::query("DELETE FROM markets WHERE block_number >= $1")
-        .bind(from_i64)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query("DELETE FROM settlement_batches WHERE block_number >= $1")
-        .bind(from_i64)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query("DELETE FROM resolution_proposals WHERE block_number >= $1")
         .bind(from_i64)
         .execute(&mut *tx)
         .await?;

@@ -4,35 +4,6 @@ use alloy::rpc::types::Log;
 use sqlx::Postgres;
 use tracing::{error, warn};
 
-pub async fn handle_net_deltas_applied(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    log: &Log,
-    ctx: &HandlerCtx<'_>,
-) -> Result<bool, shared::Error> {
-    let batch_id_topic = match log.topics().get(1) {
-        Some(b) => b,
-        None => return Ok(false),
-    };
-
-    let block_i64 = i64::try_from(ctx.block_number)
-        .map_err(|e| shared::Error::Domain(format!("block_number conversion error: {}", e)))?;
-
-    sqlx::query(
-        "UPDATE settlement_batches SET status = 'finalized', finalized_at = now(), block_number = $2
-         WHERE batch_id = $1",
-    )
-    .bind(batch_id_topic.as_slice())
-    .bind(block_i64)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| {
-        error!("settlement batch update error: {}", e);
-        shared::Error::Sqlx(e)
-    })?;
-
-    Ok(true)
-}
-
 pub async fn handle_nonce_invalidated(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     log: &Log,

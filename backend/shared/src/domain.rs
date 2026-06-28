@@ -401,9 +401,6 @@ where
 pub struct Order {
     pub salt: Bytes32,
     pub maker: Address,
-    pub signer: Address,
-    pub condition_id: Bytes32,
-    pub parent_collection_id: Bytes32,
     #[serde(deserialize_with = "deserialize_u256")]
     pub position_id: U256,
     pub price: u64,
@@ -458,18 +455,14 @@ pub fn compute_domain_separator(chain_id: u64, verifying_contract: AlloyAddress)
 /// EIP-712 struct hash for SettlementExchange.Order.
 pub fn hash_order(order: &Order) -> B256 {
     let order_typehash = keccak256(
-        "Order(bytes32 salt,address maker,address signer,bytes32 conditionId,bytes32 parentCollectionId,uint256 positionId,uint256 price,uint256 amount,uint8 side,uint256 nonce,uint256 deadline)"
+        "Order(bytes32 salt,address maker,uint256 positionId,uint256 price,uint256 amount,uint8 side,uint256 nonce,uint256 deadline)"
             .as_bytes(),
     );
-    let mut encoded = Vec::with_capacity(32 * 12);
+    let mut encoded = Vec::with_capacity(32 * 9);
     encoded.extend_from_slice(order_typehash.as_slice());
     encoded.extend_from_slice(order.salt.0.as_slice());
     encoded.extend_from_slice(&[0u8; 12]);
     encoded.extend_from_slice(order.maker.0.as_slice());
-    encoded.extend_from_slice(&[0u8; 12]);
-    encoded.extend_from_slice(order.signer.0.as_slice());
-    encoded.extend_from_slice(order.condition_id.0.as_slice());
-    encoded.extend_from_slice(order.parent_collection_id.0.as_slice());
     encoded.extend_from_slice(&order.position_id.to_be_bytes::<32>());
     encoded.extend_from_slice(&U256::from(order.price).to_be_bytes::<32>());
     encoded.extend_from_slice(&U256::from(order.amount).to_be_bytes::<32>());

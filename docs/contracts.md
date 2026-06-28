@@ -18,8 +18,8 @@ flowchart TD
         ORACLE -->|"reportPayouts"| CTF
     end
 
-    SETT_SVC["Settlement Service"] -->|"settleBatch"| SE
-    RES_SVC["Resolution Service"] -->|"proposeOutcome / disputeOutcome / finalizeOutcome"| ORACLE
+    SETT_SVC["Operator (deferred)"] -->|"settleBatch"| SE
+    RES_SVC["Operator (deferred)"] -->|"proposeOutcome / disputeOutcome / finalizeOutcome"| ORACLE
     DAPP["dApp"] -->|"deposit / withdraw / executeForcedWithdrawal"| CV
     DAPP -->|"redeemPositions"| CTF
 
@@ -87,7 +87,7 @@ Batch-settles matched orders by verifying each maker's EIP-712 signature on-chai
 |---|---|---|
 | `DEFAULT_ADMIN_ROLE` | deployer / Safe multisig | set fee rates, withdraw fees |
 | `PAUSER_ROLE` | Safe multisig | pause/unpause |
-| `OPERATOR_ROLE` | Settlement Service operator key | `settleBatch` |
+| `OPERATOR_ROLE` | Operator key (settlement service — deferred) | `settleBatch` |
 
 ### Order Struct
 
@@ -123,7 +123,7 @@ EIP-712 domain: `"Omniscient Exchange"` / `"1"`.
 
 ```mermaid
 sequenceDiagram
-    participant ST as Settlement Service
+    participant ST as Operator (deferred)
     participant SE as SettlementExchange
     participant CV as Custody
     participant CTF as Gnosis CTF
@@ -209,7 +209,7 @@ struct ResolutionSpec {
 - **Plaintext propose:** payouts are public from proposal; no reveal step. Removes unreveal-griefing/liveness vector.
 - **Bond economics:** proposer posts `bondAmount`; disputer posts `bondAmount`. Winner gets `2 * bondAmount`. Undisputed → proposer refunded.
 - **Payout validation:** `_validatePayouts` checks `length == outcomeSlotCount` and `sum != 0`.
-- **Off-chain integrity hash:** Resolution Service computes `keccak256(marketId ++ payouts)` stored in DB for audit — not an on-chain commitment.
+- **Off-chain integrity hash:** off-chain proposer computes `keccak256(marketId ++ payouts)` for audit — not an on-chain commitment (service deferred).
 
 ### Events
 

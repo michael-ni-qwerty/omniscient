@@ -3,7 +3,7 @@ use crate::events::HandlerCtx;
 use alloy::primitives::U256;
 use alloy::rpc::types::Log;
 use sqlx::Postgres;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 pub async fn handle_deposited(
     tx: &mut sqlx::Transaction<'_, Postgres>,
@@ -48,7 +48,7 @@ pub async fn handle_deposited(
     sqlx::query(
         "INSERT INTO balances (user_address, asset_type, available_amount, finalized_block_number, updated_at)
          VALUES ($1, 'usdc', $2, $3, now())
-         ON CONFLICT (user_address, asset_type, COALESCE(position_id, 0))
+         ON CONFLICT (user_address, asset_type, COALESCE(position_id, -1))
          DO UPDATE SET available_amount = balances.available_amount + EXCLUDED.available_amount,
                        finalized_block_number = EXCLUDED.finalized_block_number,
                        updated_at = now()",
@@ -99,7 +99,7 @@ pub async fn handle_withdrawn(
     sqlx::query(
         "INSERT INTO balances (user_address, asset_type, available_amount, finalized_block_number, updated_at)
          VALUES ($1, 'usdc', $2, $3, now())
-         ON CONFLICT (user_address, asset_type, COALESCE(position_id, 0))
+         ON CONFLICT (user_address, asset_type, COALESCE(position_id, -1))
          DO UPDATE SET available_amount = balances.available_amount - EXCLUDED.available_amount,
                        finalized_block_number = EXCLUDED.finalized_block_number,
                        updated_at = now()",
@@ -148,7 +148,7 @@ pub async fn handle_forced_withdrawal_executed(
     sqlx::query(
         "INSERT INTO balances (user_address, asset_type, available_amount, finalized_block_number, updated_at)
          VALUES ($1, 'usdc', $2, $3, now())
-         ON CONFLICT (user_address, asset_type, COALESCE(position_id, 0))
+         ON CONFLICT (user_address, asset_type, COALESCE(position_id, -1))
          DO UPDATE SET available_amount = balances.available_amount - EXCLUDED.available_amount,
                        finalized_block_number = EXCLUDED.finalized_block_number,
                        updated_at = now()",
@@ -167,7 +167,7 @@ pub async fn handle_forced_withdrawal_executed(
 }
 
 pub async fn handle_operator_heartbeat(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
+    _tx: &mut sqlx::Transaction<'_, Postgres>,
     log: &Log,
     ctx: &HandlerCtx<'_>,
 ) -> Result<bool, shared::Error> {
@@ -185,26 +185,16 @@ pub async fn handle_operator_heartbeat(
     };
     let timestamp = U256::from_be_bytes(ts_bytes);
 
-    sqlx::query(
-        "INSERT INTO audit_log (service, event_type, payload, created_at)
-         VALUES ('indexer', 'operator_heartbeat', $1, now())",
-    )
-    .bind(serde_json::json!({
-        "timestamp": timestamp.to_string(),
-        "block_number": ctx.block_number,
-    }))
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| {
-        error!("audit log insert error: {}", e);
-        shared::Error::Sqlx(e)
-    })?;
+    info!(
+        "OperatorHeartbeat: timestamp={} block={}",
+        timestamp, ctx.block_number
+    );
 
     Ok(true)
 }
 
 pub async fn handle_operator_inactivity_threshold_updated(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
+    _tx: &mut sqlx::Transaction<'_, Postgres>,
     log: &Log,
     ctx: &HandlerCtx<'_>,
 ) -> Result<bool, shared::Error> {
@@ -222,26 +212,16 @@ pub async fn handle_operator_inactivity_threshold_updated(
     };
     let new_threshold = U256::from_be_bytes(threshold_bytes);
 
-    sqlx::query(
-        "INSERT INTO audit_log (service, event_type, payload, created_at)
-         VALUES ('indexer', 'operator_inactivity_threshold_updated', $1, now())",
-    )
-    .bind(serde_json::json!({
-        "new_threshold": new_threshold.to_string(),
-        "block_number": ctx.block_number,
-    }))
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| {
-        error!("audit log insert error: {}", e);
-        shared::Error::Sqlx(e)
-    })?;
+    info!(
+        "OperatorInactivityThresholdUpdated: new_threshold={} block={}",
+        new_threshold, ctx.block_number
+    );
 
     Ok(true)
 }
 
 pub async fn handle_fee_rates_updated(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
+    _tx: &mut sqlx::Transaction<'_, Postgres>,
     log: &Log,
     ctx: &HandlerCtx<'_>,
 ) -> Result<bool, shared::Error> {
@@ -267,21 +247,10 @@ pub async fn handle_fee_rates_updated(
     let taker_fee = U256::from_be_bytes(taker_bytes);
     let maker_rebate = U256::from_be_bytes(maker_bytes);
 
-    sqlx::query(
-        "INSERT INTO audit_log (service, event_type, payload, created_at)
-         VALUES ('indexer', 'fee_rates_updated', $1, now())",
-    )
-    .bind(serde_json::json!({
-        "taker_fee_bps": taker_fee.to_string(),
-        "maker_rebate_bps": maker_rebate.to_string(),
-        "block_number": ctx.block_number,
-    }))
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| {
-        error!("audit log insert error: {}", e);
-        shared::Error::Sqlx(e)
-    })?;
+    info!(
+        "FeeRatesUpdated: taker_fee_bps={} maker_rebate_bps={} block={}",
+        taker_fee, maker_rebate, ctx.block_number
+    );
 
     Ok(true)
 }

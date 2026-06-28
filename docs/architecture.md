@@ -10,19 +10,16 @@ Non-custodial, AI-resolved prediction market on Polygon PoS. Off-chain Rust CLOB
 |---|---|
 | [contracts.md](contracts.md) | On-chain Solidity contracts (Custody, SettlementExchange, Oracle) |
 | [gateway.md](gateway.md) | Gateway binary — Order API, WebSocket, matcher thread |
-| [settlement.md](settlement.md) | Settlement Service — batch aggregation, on-chain submission, finality |
-| [resolution.md](resolution.md) | Resolution Service — AI resolver, expiry watcher, optimistic oracle |
 | [indexer.md](indexer.md) | Chain Indexer — log ingestion, finalization, reorg rollback, reconciliation |
 | [fund-safety.md](fund-safety.md) | Fund-safety invariants, state ownership, trust boundaries, compliance |
+| [schema.md](schema.md) | Postgres schema — all tables, columns, relationships, reorg rollback, service ownership |
 
 ## Process Topology
 
-Four Rust binaries + two stateful services, deployed via `docker-compose.yml`:
+Two Rust binaries + two stateful services, deployed via `docker-compose.yml`:
 
 ```
 gateway      (Order API + WS + matcher thread, 1 binary)   :8080 public
-settlement   (consumes matches, submits batches)            internal
-resolution   (LLM proposer + expiry watcher)                 internal
 indexer      (chain → off-chain reconciliation)              internal
 redpanda     (single binary, no JVM/ZK)                     :9092 / :9644 / :8081
 postgres                                                            :5432
@@ -38,8 +35,8 @@ backend/
   schema.sql          (Postgres DDL — all tables)
   shared/             (domain types, config, kafka, db, tracing, constants, error)
   gateway/            (axum HTTP/WS + crossbeam matcher thread)
-  settlement/         (alloy RPC + rdkafka consumer + sqlx)
-  resolution/         (reqwest LLM client + expiry watcher + sqlx)
+  settlement/         (stub — deferred)
+  resolution/         (stub — deferred)
   indexer/            (alloy log polling + reorg + finalization + event handlers)
 contracts/
   foundry.toml        (solc 0.8.28, OZ v5.1.0, via_ir, cancun)
@@ -58,17 +55,13 @@ flowchart TB
     subgraph OffChain["OFF-CHAIN SERVICES (Rust, operator)"]
         direction TB
         GW["Gateway<br/>axum HTTP/WS + matcher thread"]
-        SETT["Settlement Service<br/>alloy · rdkafka"]
-        RES["Resolution Service<br/>reqwest LLM + expiry watcher"]
         IDX["Chain Indexer<br/>alloy log polling + reorg"]
-        PG[("Postgres<br/>orders · holds · balances · batches")]
+        PG[("Postgres<br/>orders · holds · balances · markets")]
     end
 
     subgraph Broker["REDPANDA (Kafka API)"]
         direction LR
         T1(["orders.matched"])
-        T3(["settlement.batches"])
-        T4(["resolution.events"])
     end
 
     subgraph Chain["POLYGON PoS — on-chain (trustless)"]
@@ -84,20 +77,11 @@ flowchart TB
     GW <-->|"live feed (WS)"| UI
     GW -->|"3 · enqueue cmd"| GW
     GW -->|"4 · produce match"| T1
-    T1 -->|"5a · consume"| SETT
-    T1 -->|"5b · broadcast"| GW
-    SETT -->|"6 · settleBatch tx"| EXCH
-    EXCH --> CUST
-    EXCH --> CTF
-    RES -->|"7 · proposeOutcome tx"| ORACLE
-    ORACLE -->|"8 · reportPayouts"| CTF
-    UI -->|"9 · redeem shares"| CTF
+    T1 -->|"5a · broadcast"| GW
     Chain ==>|"event logs"| IDX
     IDX -->|"reconcile (HTTP)"| GW
     IDX --> PG
     GW --> PG
-    SETT --> PG
-    RES --> PG
 
     classDef client fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
     classDef svc fill:#ede7f6,stroke:#5e35b1,color:#311b92;
@@ -105,9 +89,9 @@ flowchart TB
     classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
     classDef store fill:#fafafa,stroke:#616161,color:#212121;
     class UI client;
-    class GW,SETT,RES,IDX svc;
+    class GW,IDX svc;
     class PG store;
-    class T1,T3,T4 broker;
+    class T1 broker;
     class CUST,EXCH,CTF,ORACLE chain;
 ```
 
@@ -120,17 +104,11 @@ flowchart TB
 | dApp                                    | Custody            | RPC (wallet)    | deposit / withdraw / redeem                |
 | Gateway                                 | Matcher thread     | IPC (crossbeam) | validated command stream                   |
 | Gateway                                 | Redpanda           | KAFKA           | produce `orders.matched`                   |
-| Redpanda                                | Settlement         | KAFKA           | consume `orders.matched`                   |
 | Redpanda                                | Gateway            | KAFKA           | consume `orders.matched` → WS              |
-| Settlement                              | SettlementExchange | RPC             | `settleBatch` tx (+ finality wait)         |
-| Settlement                              | Postgres           | SQL             | batch state, order fills                   |
-| Resolution                              | LLM provider       | HTTP            | proposal + source fetch/verify             |
-| Resolution                              | Oracle             | RPC             | `proposeOutcome` tx (deferred seam)        |
-| Resolution                              | Postgres           | SQL             | proposals, market state                    |
 | Indexer                                 | Polygon RPC        | RPC             | poll logs, fetch blocks                    |
 | Indexer                                 | Postgres           | SQL             | write reconciled state                     |
 | Indexer                                 | Gateway            | HTTP            | `/internal/reconcile` (deposits, finality) |
-| {gateway,settlement,resolution,indexer} | Postgres           | SQL             | operational state                          |
+| {gateway,indexer}                       | Postgres           | SQL             | operational state                          |
 
 ## Key Constants
 

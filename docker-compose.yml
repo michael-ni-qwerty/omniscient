@@ -8,7 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U omniscient -d omniscient"]
+      test: [ "CMD-SHELL", "pg_isready -U omniscient -d omniscient" ]
       interval: 2s
       timeout: 5s
       retries: 5
@@ -44,16 +44,10 @@ services:
     networks:
       - omniscient
 
-
   kafka-topics:
     image: redpandadata/redpanda:latest
     command: >
-      bash -c "
-      rpk topic create orders.matched --partitions 8 --replicas 1 --brokers redpanda:9092 || true &&
-      rpk topic create settlement.batches --partitions 4 --replicas 1 --brokers redpanda:9092 || true &&
-      rpk topic create positions.updated --partitions 4 --replicas 1 --brokers redpanda:9092 || true &&
-      rpk topic create resolution.events --partitions 4 --replicas 1 --brokers redpanda:9092 || true
-      "
+      bash -c " rpk topic create orders.matched --partitions 8 --replicas 1 --brokers redpanda:9092 || true "
     depends_on:
       - redpanda
     networks:
@@ -78,45 +72,7 @@ services:
       - "8080:8080"
     networks:
       - omniscient
-    command: ["/usr/local/bin/gateway"]
-
-  settlement:
-    build:
-      context: ./backend
-      args:
-        - BIN=settlement
-    env_file: .env
-    environment:
-      - RUST_LOG=${RUST_LOG:-info}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redpanda:
-        condition: service_started
-      kafka-topics:
-        condition: service_completed_successfully
-    networks:
-      - omniscient
-    command: ["/usr/local/bin/settlement"]
-
-  resolution:
-    build:
-      context: ./backend
-      args:
-        - BIN=resolution
-    env_file: .env
-    environment:
-      - RUST_LOG=${RUST_LOG:-info}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redpanda:
-        condition: service_started
-      kafka-topics:
-        condition: service_completed_successfully
-    networks:
-      - omniscient
-    command: ["/usr/local/bin/resolution"]
+    command: [ "/usr/local/bin/gateway" ]
 
   indexer:
     build:
@@ -135,7 +91,7 @@ services:
         condition: service_completed_successfully
     networks:
       - omniscient
-    command: ["/usr/local/bin/indexer"]
+    command: [ "/usr/local/bin/indexer" ]
 
 volumes:
   pgdata:

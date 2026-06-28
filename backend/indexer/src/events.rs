@@ -30,7 +30,6 @@ define_topic!(
     "OperatorInactivityThresholdUpdated(uint256)"
 );
 define_topic!(FEE_RATES_UPDATED, "FeeRatesUpdated(uint256,uint256)");
-define_topic!(NET_DELTAS_APPLIED, "NetDeltasApplied(bytes32,uint256)");
 define_topic!(NONCE_INVALIDATED, "NonceInvalidated(address,uint256)");
 define_topic!(OUTCOME_RESOLVED, "OutcomeResolved(bytes32,uint256[])");
 define_topic!(MARKET_CREATED, "MarketCreated(bytes32,bytes32,uint256)");
@@ -68,8 +67,6 @@ pub async fn dispatch(
         custody::handle_operator_inactivity_threshold_updated(tx, log, ctx).await
     } else if *topic0 == *FEE_RATES_UPDATED {
         custody::handle_fee_rates_updated(tx, log, ctx).await
-    } else if *topic0 == *NET_DELTAS_APPLIED {
-        settlement::handle_net_deltas_applied(tx, log, ctx).await
     } else if *topic0 == *NONCE_INVALIDATED {
         settlement::handle_nonce_invalidated(tx, log, ctx).await
     } else if *topic0 == *MARKET_CREATED {

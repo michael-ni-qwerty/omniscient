@@ -16,14 +16,18 @@ pub struct AppConfig {
     pub log_format: String,
     pub gateway_bind: String,
     pub gateway_internal_secret: String,
+    #[serde(default = "default_llm_api_url")]
     pub llm_api_url: String,
-    pub llm_api_key: String,
     #[serde(default = "default_rust_log")]
     pub rust_log: String,
 }
 
 fn default_rust_log() -> String {
     "info".to_string()
+}
+
+fn default_llm_api_url() -> String {
+    "http://localhost:11434/v1/chat/completions".to_string()
 }
 
 impl AppConfig {
