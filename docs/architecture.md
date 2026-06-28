@@ -1,271 +1,148 @@
 # Omniscient — System Architecture
 
-This document defines the architectural components, their exact internal execution structures, individual boundary responsibilities, and the global communication flows of the Omniscient prediction market system.
+Non-custodial, AI-resolved prediction market on Polygon PoS. Off-chain Rust CLOB with on-chain batched settlement via EIP-712 signed orders. Resolution via optimistic oracle with bonded dispute window.
 
----
+**Units:** price `[0,1]` scaled to `1e6`; complete CTF outcome set = 1 USDC; winning share redeems for 1 USDC; USDC = 6 decimals.
 
-## 1. Gateway (Order API & Matching Engine)
+## Documentation Index
 
-The Gateway acts as the public-facing entry point for user orders and WebSocket streaming feeds. It manages client authentication, in-memory state, and balance reservations.
+| Document | Scope |
+|---|---|
+| [contracts.md](contracts.md) | On-chain Solidity contracts (Custody, SettlementExchange, Oracle) |
+| [gateway.md](gateway.md) | Gateway binary — Order API, WebSocket, matcher thread |
+| [settlement.md](settlement.md) | Settlement Service — batch aggregation, on-chain submission, finality |
+| [resolution.md](resolution.md) | Resolution Service — AI resolver, expiry watcher, optimistic oracle |
+| [indexer.md](indexer.md) | Chain Indexer — log ingestion, finalization, reorg rollback, reconciliation |
+| [fund-safety.md](fund-safety.md) | Fund-safety invariants, state ownership, trust boundaries, compliance |
 
-```mermaid
-flowchart TD
-    subgraph Gateway["GATEWAY BINARY"]
-        API["Order API<br/>- EIP-712 verify<br/>- Balance checks"]
-        ME["Matching Engine<br/>- Price-Time FIFO<br/>- Self-Trade Prev"]
-        API == "Internal IPC<br/>(MPSC Queue)" ===> ME
-    end
+## Process Topology
 
-    Client["HTTP POST /orders<br/>(Signed Order)"] --> API
-    API -->|"SQL<br/>(Reserve holds)"| PG[(Postgres)]
-    ME -->|"Kafka Produce<br/>(Provisional fills)"| RP([Redpanda])
+Four Rust binaries + two stateful services, deployed via `docker-compose.yml`:
 
-    classDef bin fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
-    classDef ext fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-    classDef store fill:#fafafa,stroke:#616161,color:#212121;
-    classDef broker fill:#fff3e0,stroke:#ef6c00,color:#e65100;
-
-    class Gateway bin;
-    class Client ext;
-    class PG store;
-    class RP broker;
+```
+gateway      (Order API + WS + matcher thread, 1 binary)   :8080 public
+settlement   (consumes matches, submits batches)            internal
+resolution   (LLM proposer + expiry watcher)                 internal
+indexer      (chain → off-chain reconciliation)              internal
+redpanda     (single binary, no JVM/ZK)                     :9092 / :9644 / :8081
+postgres                                                            :5432
 ```
 
-### Key Responsibilities
-- **Authentication & Validation:** Decodes and verifies EIP-712 order signatures against user addresses and checks sequential nonces.
-- **Collateral Hold Reservation:** Checks availability of funds against indexed balances and locks required collateral in Postgres before the order is placed on the book to guarantee pre-trade collateralization.
-- **Order Queueing:** Enqueues validated commands to an in-process bounded queue to prevent matching loop memory exhaustion.
-- **Matching Execution:** Drives an allocation-free, single-writer matching loop enforcing strict price-time priority and self-trade prevention.
-- **WebSocket Broadcast:** Consumes matching records from Redpanda to feed live order books and execution streams to clients.
+Only `gateway:8080` is public. All other services are operator-internal.
 
----
+## Crate Layout
 
-## 2. Settlement Service
-
-The Settlement Service is the operator-controlled worker responsible for bridging off-chain matches to the trustless ledger by preparing and dispatching batched transactions.
-
-```mermaid
-flowchart TD
-    RP([Redpanda]) -->|"Kafka Consume<br/>(orders.matched)"| BM
-
-    subgraph SS["SETTLEMENT SERVICE"]
-        BM["Batch Manager<br/>- Net positions<br/>- Idempotency key"]
-        TE["Transaction Engine<br/>- EIP-1559 gas bump<br/>- Sign via KMS/HSM"]
-        BM == "IPC" ===> TE
-    end
-
-    TE -->|"JSON-RPC (settleBatch)"| SE["Settlement Exchange<br/>(Polygon)"]
-
-    classDef bin fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
-    classDef broker fill:#fff3e0,stroke:#ef6c00,color:#e65100;
-    classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
-
-    class SS bin;
-    class RP broker;
-    class SE chain;
+```
+backend/
+  Cargo.toml          (workspace: shared, gateway, settlement, resolution, indexer)
+  schema.sql          (Postgres DDL — all tables)
+  shared/             (domain types, config, kafka, db, tracing, constants, error)
+  gateway/            (axum HTTP/WS + crossbeam matcher thread)
+  settlement/         (alloy RPC + rdkafka consumer + sqlx)
+  resolution/         (reqwest LLM client + expiry watcher + sqlx)
+  indexer/            (alloy log polling + reorg + finalization + event handlers)
+contracts/
+  foundry.toml        (solc 0.8.28, OZ v5.1.0, via_ir, cancun)
+  src/                (Custody.sol, SettlementExchange.sol, Oracle.sol, interfaces/)
+  test/               (Custody, CustodyInvariant, Oracle, SettlementExchange, CTFIntegration, Exploit)
 ```
 
-### Key Responsibilities
-- **Delta Aggregation:** Consumes individual matched execution logs from Redpanda and nets position deltas per-user across a configurable batch size.
-- **Idempotency Control:** Computes a unique batch hash and maps it to a database state tracking layer, guaranteeing exactly-once application at the chain boundary.
-- **KMS Transaction Signing:** Dispatches transaction payloads to an HSM or cloud-managed KMS provider to isolate operator keys.
-- **Priority-Fee Bumping:** Implements dynamic gas tracking using EIP-1559 fee structures, auto-replacing stuck transactions via incremental nonce-equivalent replacements.
-
----
-
-## 3. Resolution Service
-
-The Resolution Service operates as an asynchronous worker that manages market finalization through the resolver registry. **MVP is AI-only:** every market binds to the AI optimistic-oracle resolver. Deterministic on-chain sources (Pyth auto-finalize) and trusted-API sources are deferred post-MVP behind the same `Resolver` trait.
-
-```mermaid
-flowchart TD
-    Ext["External Sources<br/>(LLM / API)<br/>Pyth deferred MVP"] -->|"HTTP Query / JSON Fetch"| RR
-
-    subgraph RS["RESOLUTION SERVICE"]
-        RR["Resolver Registry<br/>- AI (MVP)<br/>- API (deferred)<br/>- Pyth (deferred)"]
-        CRL["Commit-Reveal Loop<br/>- Generate hash<br/>- Manage dispute"]
-        RR == "IPC (deferred)" ===> CRL
-    end
-
-    CRL -->|"JSON-RPC (commit / reveal)"| Oracle["Oracle Contract<br/>(Polygon)"]
-
-    classDef bin fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
-    classDef ext fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-    classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
-
-    class RS bin;
-    class Ext ext;
-    class Oracle chain;
-```
-
-### Key Responsibilities
-- **Resolver Registry Dispatch:** Routes expired markets to the **AI optimistic resolver** (MVP) inside a unified `Resolver` abstraction. Deterministic on-chain (Pyth) and trusted-API resolvers are deferred post-MVP behind the same trait.
-- **On-Chain Proof Sourcing (post-MVP):** Would fetch historical Pyth Benchmark payloads on-demand at exact expiry intervals to pass to the Oracle's on-chain verifiers.
-- **AI Claim Synthesis:** Directs LLM prompts, parses structured proposals, and verifies cited source URLs to generate cryptographic proof bundles.
-- **Commit-Reveal Execution:** Generates commit hashes, schedules revealed payloads, and monitors active challenge/dispute windows.
-
----
-
-## 4. Chain Indexer
-
-The Chain Indexer is the unidirectional pipeline for synchronizing the finalized on-chain state back into the off-chain Postgres and Gateway execution spaces.
-
-```mermaid
-flowchart TD
-    RPC["Polygon RPC Node"] -->|"WebSocket / JSON-RPC Poll<br/>(Logs & Blocks)"| BP
-
-    subgraph CI["CHAIN INDEXER"]
-        BP["Block Parser<br/>- Parse log topics"]
-        FE["Finality Evaluator<br/>- Wait 2-5s (Heim)"]
-        RM["Reorg Monitor<br/>- Rollback state"]
-        BP == "IPC" ===> FE
-        FE == "IPC" ===> RM
-    end
-
-    FE -->|"HTTP POST<br/>(/internal/reconcile)"| GW["Gateway"]
-    RM -->|"SQL"| PG[(Postgres)]
-
-    classDef bin fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
-    classDef ext fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-    classDef store fill:#fafafa,stroke:#616161,color:#212121;
-    classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
-
-    class CI bin;
-    class GW bin;
-    class RPC chain;
-    class PG store;
-```
-
-### Key Responsibilities
-- **Log Parsing:** Subscribes to Polygon EVM execution logs, processing specific contract events (`Deposit`, `BatchSettled`, `OracleResolved`).
-- **Finality Tracking:** Enforces a minimum blocks-to-finality delay (~2–5s, Heimdall v2) before propagating transaction updates.
-- **Reorg Safe Synchronization:** Tracks chain depth and automatically rolls back unfinalized Postgres records in the event of a network chain reorg.
-- **Credit Reconciliation:** Delivers balance-refresh instructions via private HTTP endpoints to notify the Gateway that deposits are safe to trade or batches have settled on-chain.
-
----
-
-## 5. Smart Contracts (Polygon PoS)
-
-The smart contracts are the ultimate source of truth, enforcing non-custodial ownership and cryptographic checks for user balances.
-
-```mermaid
-flowchart TD
-    Svc["Settlement Svc /<br/>Resolution Svc"] -->|"JSON-RPC Writes<br/>(signed orders & proofs)"| Contracts
-
-    subgraph Contracts["POLYGON CONTRACTS"]
-        direction TB
-        SE["SettlementExchange<br/>- EIP-712 Verify<br/>- Apply net deltas"]
-        Oracle["Oracle Contract<br/>- Commit-Reveal logic<br/>- Bonded disputes"]
-        CV["Custody Vault<br/>- Holds USDC pool<br/>- Escape hatch"]
-        CTF["Gnosis CTF (ERC1155)<br/>- Outcome positions<br/>- Redeems winning sets"]
-
-        SE -->|"calls"| CV
-        Oracle -->|"sets outcome"| CTF
-    end
-
-    Contracts -->|"EVM Event Logs<br/>(Deposits, Settlement, Resolves)"| CI["Chain Indexer"]
-
-    classDef bin fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
-    classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px;
-    classDef contractsGroup fill:#eafaf1,stroke:#2e7d32,color:#1b5e20,stroke-width:1px;
-
-    class Svc bin;
-    class CI bin;
-    class SE,Oracle,CV,CTF chain;
-    class Contracts contractsGroup;
-```
-
-### Key Responsibilities
-- **USDC Custody & Escape Hatch:** Vaults deposited ERC-20 collateral. Governs a time-delayed forced escape hatch when paused, allowing user-driven direct redemptions.
-- **On-Chain Order Verification:** Re-evaluates order signatures and increments nonces directly on-chain within `SettlementExchange` to secure funds from operator manipulation.
-- **Outcome Tokenization:** Leverages the Gnosis Conditional Tokens Framework (CTF) to split, merge, and redeem binary ERC-1155 outcome share sets against collateral reserves.
-- **Economic Dispute Routing:** Holds dispute bonds and controls the state machine governing dispute timelines and human/DAO escalations.
-
----
-
-## 6. Global Integrated Topology
-
-The integrated global diagram displays the multi-zone flow of data, state, and cryptographically signed payloads.
+## Global Topology
 
 ```mermaid
 flowchart TB
-    subgraph Client["CLIENT (Untrusted)"]
-        UI["Web UI / dApp"]
+    subgraph Client["CLIENT (untrusted)"]
+        UI["Web UI / dApp<br/>wallet · EIP-712 signing"]
     end
 
-    subgraph Operator["OPERATOR (Off-chain Rust Stack)"]
+    subgraph OffChain["OFF-CHAIN SERVICES (Rust, operator)"]
         direction TB
-        GW["Gateway (Order API)"]
-        ME["Matching Engine (Book)"]
-        PG[("Postgres DB")]
-        RP([Redpanda<br/>'orders.matched'])
-        Settlement["Settlement Service"]
-        Resolution["Resolution Service"]
-        Indexer["Chain Indexer"]
-        External["Pyth/LLM Providers"]
+        GW["Gateway<br/>axum HTTP/WS + matcher thread"]
+        SETT["Settlement Service<br/>alloy · rdkafka"]
+        RES["Resolution Service<br/>reqwest LLM + expiry watcher"]
+        IDX["Chain Indexer<br/>alloy log polling + reorg"]
+        PG[("Postgres<br/>orders · holds · balances · batches")]
     end
 
-    subgraph Chain["ON-CHAIN (Polygon PoS trustless execution)"]
+    subgraph Broker["REDPANDA (Kafka API)"]
+        direction LR
+        T1(["orders.matched"])
+        T3(["settlement.batches"])
+        T4(["resolution.events"])
+    end
+
+    subgraph Chain["POLYGON PoS — on-chain (trustless)"]
         direction TB
-        RPC["RPC Node & Logs"]
-        subgraph Contracts["ON-CHAIN SOLIDITY CONTRACTS"]
-            Vault["Custody Vault"]
-            SE["SettlementExchange"]
-            CTF["Gnosis CTF tokens"]
-            Oracle["Oracle Contract"]
-        end
+        CUST["Custody<br/>USDC vault · escape hatch"]
+        EXCH["SettlementExchange<br/>EIP-712 verify · net deltas"]
+        CTF["Gnosis CTF<br/>ERC-1155 outcomes"]
+        ORACLE["Oracle<br/>plaintext optimistic · bonded dispute"]
     end
 
-    %% Client Interactions
-    UI -->|"HTTP POST /orders<br/>(Signed EIP-712 Order)"| GW
-    UI -->|"deposit USDC"| Vault
-    GW == "WS Fills / Orderbook Feed" ===> UI
+    UI -->|"1 · deposit USDC"| CUST
+    UI -->|"2 · signed order (HTTP)"| GW
+    GW <-->|"live feed (WS)"| UI
+    GW -->|"3 · enqueue cmd"| GW
+    GW -->|"4 · produce match"| T1
+    T1 -->|"5a · consume"| SETT
+    T1 -->|"5b · broadcast"| GW
+    SETT -->|"6 · settleBatch tx"| EXCH
+    EXCH --> CUST
+    EXCH --> CTF
+    RES -->|"7 · proposeOutcome tx"| ORACLE
+    ORACLE -->|"8 · reportPayouts"| CTF
+    UI -->|"9 · redeem shares"| CTF
+    Chain ==>|"event logs"| IDX
+    IDX -->|"reconcile (HTTP)"| GW
+    IDX --> PG
+    GW --> PG
+    SETT --> PG
+    RES --> PG
 
-    %% Operator Internal Flows
-    GW -->|"IPC (Enqueues Cmd)"| ME
-    GW -->|"SQL"| PG
-    ME -->|"Produce"| RP
-    RP -->|"Consume"| Settlement
-    RP -->|"Consume"| GW
-    PG <-->|"SQL"| Settlement
-    PG <-->|"SQL"| Indexer
-    Settlement -->|"SQL"| PG
-
-    %% Resolution internal
-    Resolution -->|"HTTP Resolves"| External
-    External --> Resolution
-
-    %% Operator to Chain Writes
-    Settlement -->|"EIP-1559 Tx (net deltas)"| SE
-    Resolution -->|"Commit / Reveal Tx"| Oracle
-
-    %% Indexer / RPC Reads
-    RPC -->|"WebSocket / JSON-RPC reads"| Indexer
-    Indexer -->|"HTTP Balance Credits"| GW
-
-    %% Contracts Interactions & Dependencies
-    SE -->|"calls"| Vault
-    Vault <-->|"balance transfers"| CTF
-    SE -->|"calls"| CTF
-    Oracle -->|"sets outcome"| CTF
-
-    %% Transaction Verification Logic from Diagrams
-    GW -.->|"Re-verifies Order Signatures"| SE
-    UI -.->|"Commit-Reveal proposal + Dispute"| Oracle
-
-    %% RPC Connection
-    Contracts -->|"EVM Event Logs"| RPC
-
-    %% Styling
     classDef client fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-    classDef svc fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:2px;
+    classDef svc fill:#ede7f6,stroke:#5e35b1,color:#311b92;
     classDef broker fill:#fff3e0,stroke:#ef6c00,color:#e65100;
     classDef chain fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
     classDef store fill:#fafafa,stroke:#616161,color:#212121;
-
     class UI client;
-    class GW,ME,Settlement,Resolution,Indexer svc;
+    class GW,SETT,RES,IDX svc;
     class PG store;
-    class RP broker;
-    class Vault,SE,CTF,Oracle,RPC,Contracts chain;
+    class T1,T3,T4 broker;
+    class CUST,EXCH,CTF,ORACLE chain;
 ```
+
+## Communication Matrix
+
+| From                                    | To                 | Transport       | Payload                                    |
+| -----------------------------------------| --------------------| -----------------| --------------------------------------------|
+| dApp                                    | Gateway            | HTTP            | submit/cancel signed order                 |
+| dApp                                    | Gateway            | WS              | subscribe live fills/book                  |
+| dApp                                    | Custody            | RPC (wallet)    | deposit / withdraw / redeem                |
+| Gateway                                 | Matcher thread     | IPC (crossbeam) | validated command stream                   |
+| Gateway                                 | Redpanda           | KAFKA           | produce `orders.matched`                   |
+| Redpanda                                | Settlement         | KAFKA           | consume `orders.matched`                   |
+| Redpanda                                | Gateway            | KAFKA           | consume `orders.matched` → WS              |
+| Settlement                              | SettlementExchange | RPC             | `settleBatch` tx (+ finality wait)         |
+| Settlement                              | Postgres           | SQL             | batch state, order fills                   |
+| Resolution                              | LLM provider       | HTTP            | proposal + source fetch/verify             |
+| Resolution                              | Oracle             | RPC             | `proposeOutcome` tx (deferred seam)        |
+| Resolution                              | Postgres           | SQL             | proposals, market state                    |
+| Indexer                                 | Polygon RPC        | RPC             | poll logs, fetch blocks                    |
+| Indexer                                 | Postgres           | SQL             | write reconciled state                     |
+| Indexer                                 | Gateway            | HTTP            | `/internal/reconcile` (deposits, finality) |
+| {gateway,settlement,resolution,indexer} | Postgres           | SQL             | operational state                          |
+
+## Key Constants
+
+| Constant | Value | Source |
+|---|---|---|
+| `PRICE_SCALE` | 1,000,000 | `shared/src/constants.rs` |
+| `USDC_DECIMALS` | 6 | `shared/src/constants.rs` |
+| `TAKER_FEE_BPS` | 50 (0.5%) | `shared/src/constants.rs` |
+| `MAKER_REBATE_BPS` | 10 (0.1%) | `shared/src/constants.rs` |
+| `FINALITY_BLOCKS` | 12 | `shared/src/constants.rs` |
+| solc version | 0.8.28 | `foundry.toml` |
+| EVM version | cancun | `foundry.toml` |
+| CTF address (Amoy) | `0x69308FB512518e39F9b16112fA8d994F4e2Bf8bB` | `foundry.toml` |
+| USDC address (Amoy) | `0x9c4E1703476E875070EE25b56A58B008CFb8FA78` | `foundry.toml` |
+| Chain ID (Amoy) | 80002 | `.env.example` |

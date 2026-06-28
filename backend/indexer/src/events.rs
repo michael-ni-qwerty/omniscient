@@ -19,34 +19,25 @@ macro_rules! define_topic {
 }
 
 define_topic!(DEPOSITED, "Deposited(address,uint256,uint256)");
-define_topic!(WITHDRAWN, "Withdrawn(address,address,uint256,uint256)");
-define_topic!(
-    FORCED_WITHDRAWAL_REQUESTED,
-    "ForcedWithdrawalRequested(address,uint256)"
-);
-define_topic!(
-    FORCED_WITHDRAWAL_CANCELLED,
-    "ForcedWithdrawalCancelled(address)"
-);
+define_topic!(WITHDRAWN, "Withdrawn(address,uint256,uint256)");
 define_topic!(
     FORCED_WITHDRAWAL_EXECUTED,
     "ForcedWithdrawalExecuted(address,address,uint256)"
 );
+define_topic!(OPERATOR_HEARTBEAT, "OperatorHeartbeat(uint256)");
 define_topic!(
-    FORCED_WITHDRAWAL_DELAY_UPDATED,
-    "ForcedWithdrawalDelayUpdated(uint256,uint256)"
-);
-define_topic!(
-    SIGNER_APPROVAL_SET,
-    "SignerApprovalSet(address,address,bool)"
+    OPERATOR_INACTIVITY_THRESHOLD_UPDATED,
+    "OperatorInactivityThresholdUpdated(uint256)"
 );
 define_topic!(FEE_RATES_UPDATED, "FeeRatesUpdated(uint256,uint256)");
 define_topic!(NET_DELTAS_APPLIED, "NetDeltasApplied(bytes32,uint256)");
 define_topic!(NONCE_INVALIDATED, "NonceInvalidated(address,uint256)");
 define_topic!(OUTCOME_RESOLVED, "OutcomeResolved(bytes32,uint256[])");
 define_topic!(MARKET_CREATED, "MarketCreated(bytes32,bytes32,uint256)");
-define_topic!(OUTCOME_PROPOSED, "OutcomeProposed(bytes32,bytes32,address)");
-define_topic!(OUTCOME_REVEALED, "OutcomeRevealed(bytes32,uint256[])");
+define_topic!(
+    OUTCOME_PROPOSED,
+    "OutcomeProposed(bytes32,address,uint256[])"
+);
 define_topic!(OUTCOME_DISPUTED, "OutcomeDisputed(bytes32,address,string)");
 define_topic!(DISPUTE_RESOLVED, "DisputeResolved(bytes32,uint256[])");
 
@@ -67,34 +58,28 @@ pub async fn dispatch(
 
     if *topic0 == *DEPOSITED {
         custody::handle_deposited(tx, log, ctx).await
+    } else if *topic0 == *WITHDRAWN {
+        custody::handle_withdrawn(tx, log, ctx).await
+    } else if *topic0 == *FORCED_WITHDRAWAL_EXECUTED {
+        custody::handle_forced_withdrawal_executed(tx, log, ctx).await
+    } else if *topic0 == *OPERATOR_HEARTBEAT {
+        custody::handle_operator_heartbeat(tx, log, ctx).await
+    } else if *topic0 == *OPERATOR_INACTIVITY_THRESHOLD_UPDATED {
+        custody::handle_operator_inactivity_threshold_updated(tx, log, ctx).await
+    } else if *topic0 == *FEE_RATES_UPDATED {
+        custody::handle_fee_rates_updated(tx, log, ctx).await
     } else if *topic0 == *NET_DELTAS_APPLIED {
         settlement::handle_net_deltas_applied(tx, log, ctx).await
     } else if *topic0 == *NONCE_INVALIDATED {
         settlement::handle_nonce_invalidated(tx, log, ctx).await
-    } else if *topic0 == *OUTCOME_RESOLVED {
-        oracle::handle_outcome_resolved(tx, log, ctx).await
-    } else if *topic0 == *WITHDRAWN {
-        custody::handle_withdrawn(tx, log, ctx).await
-    } else if *topic0 == *FORCED_WITHDRAWAL_REQUESTED {
-        custody::handle_forced_withdrawal_requested(tx, log, ctx).await
-    } else if *topic0 == *FORCED_WITHDRAWAL_CANCELLED {
-        custody::handle_forced_withdrawal_cancelled(tx, log, ctx).await
-    } else if *topic0 == *FORCED_WITHDRAWAL_EXECUTED {
-        custody::handle_forced_withdrawal_executed(tx, log, ctx).await
-    } else if *topic0 == *FORCED_WITHDRAWAL_DELAY_UPDATED {
-        custody::handle_forced_withdrawal_delay_updated(tx, log, ctx).await
-    } else if *topic0 == *SIGNER_APPROVAL_SET {
-        custody::handle_signer_approval_set(tx, log, ctx).await
-    } else if *topic0 == *FEE_RATES_UPDATED {
-        custody::handle_fee_rates_updated(tx, log, ctx).await
     } else if *topic0 == *MARKET_CREATED {
         oracle::handle_market_created(tx, log, ctx).await
     } else if *topic0 == *OUTCOME_PROPOSED {
         oracle::handle_outcome_proposed(tx, log, ctx).await
-    } else if *topic0 == *OUTCOME_REVEALED {
-        oracle::handle_outcome_revealed(tx, log, ctx).await
     } else if *topic0 == *OUTCOME_DISPUTED {
         oracle::handle_outcome_disputed(tx, log, ctx).await
+    } else if *topic0 == *OUTCOME_RESOLVED {
+        oracle::handle_outcome_resolved(tx, log, ctx).await
     } else if *topic0 == *DISPUTE_RESOLVED {
         oracle::handle_dispute_resolved(tx, log, ctx).await
     } else {

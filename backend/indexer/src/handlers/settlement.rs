@@ -63,6 +63,19 @@ pub async fn handle_nonce_invalidated(
         .map_err(|e| shared::Error::Domain(format!("nonce conversion error: {}", e)))?;
 
     sqlx::query(
+        "INSERT INTO users (address, cancellation_nonce) VALUES ($1, $2)
+         ON CONFLICT (address) DO UPDATE SET cancellation_nonce = EXCLUDED.cancellation_nonce",
+    )
+    .bind(user_addr)
+    .bind(nonce_i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        error!("user nonce update error: {}", e);
+        shared::Error::Sqlx(e)
+    })?;
+
+    sqlx::query(
         "UPDATE orders SET status = 'cancelled', updated_at = now()
          WHERE user_address = $1 AND nonce < $2 AND status = 'open'",
     )

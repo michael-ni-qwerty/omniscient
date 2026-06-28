@@ -66,57 +66,18 @@ pub async fn handle_market_created(
 pub async fn handle_outcome_proposed(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     log: &Log,
-    _ctx: &HandlerCtx<'_>,
+    ctx: &HandlerCtx<'_>,
 ) -> Result<bool, shared::Error> {
     let market_id = match log.topics().get(1) {
         Some(m) => m,
         None => return Ok(false),
     };
     let market_id_bytes = market_id.as_slice();
-    let commitment = match log.topics().get(2) {
-        Some(c) => c,
-        None => return Ok(false),
-    };
-    let commitment_bytes = commitment.as_slice();
-    let proposer = match log.topics().get(3) {
+    let proposer = match log.topics().get(2) {
         Some(p) => p,
         None => return Ok(false),
     };
     let proposer_addr = &proposer.as_slice()[12..32];
-
-    sqlx::query(
-        "INSERT INTO resolution_proposals (market_id, resolver_id, commitment, status, proposer_address, committed_at, created_at, updated_at)
-         VALUES ($1, 'oracle', $2, 'committed', $3, now(), now(), now())
-         ON CONFLICT (market_id) DO UPDATE SET
-         commitment = EXCLUDED.commitment,
-         status = 'committed',
-         proposer_address = EXCLUDED.proposer_address,
-         committed_at = now(),
-         updated_at = now()",
-    )
-    .bind(market_id_bytes)
-    .bind(commitment_bytes)
-    .bind(proposer_addr)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| {
-        error!("resolution proposal insert error: {}", e);
-        shared::Error::Sqlx(e)
-    })?;
-
-    Ok(true)
-}
-
-pub async fn handle_outcome_revealed(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    log: &Log,
-    _ctx: &HandlerCtx<'_>,
-) -> Result<bool, shared::Error> {
-    let market_id = match log.topics().get(1) {
-        Some(m) => m,
-        None => return Ok(false),
-    };
-    let market_id_bytes = market_id.as_slice();
 
     let payouts = match parse_u256_array(&log.data().data) {
         Some(p) => p,
@@ -124,19 +85,39 @@ pub async fn handle_outcome_revealed(
     };
     let payouts_json = serde_json::to_value(&payouts).unwrap_or(serde_json::Value::Null);
 
+    let block_i64 = i64::try_from(ctx.block_number)
+        .map_err(|e| shared::Error::Domain(format!("block_number conversion error: {}", e)))?;
+
     sqlx::query(
-        "UPDATE resolution_proposals
-         SET status = 'revealed', proposed_payouts = $2, revealed_at = now(), updated_at = now()
-         WHERE market_id = $1",
+        "INSERT INTO resolution_proposals (market_id, round, resolver_id, proposed_payouts, status, proposer_address, proposed_at, block_number, created_at, updated_at)
+         VALUES ($1, 0, 'oracle', $2, 'proposed', $3, now(), $4, now(), now())
+         ON CONFLICT (market_id, round) DO UPDATE SET
+         proposed_payouts = EXCLUDED.proposed_payouts,
+         status = 'proposed',
+         proposer_address = EXCLUDED.proposer_address,
+         proposed_at = now(),
+         block_number = EXCLUDED.block_number,
+         updated_at = now()",
     )
     .bind(market_id_bytes)
     .bind(payouts_json)
+    .bind(proposer_addr)
+    .bind(block_i64)
     .execute(&mut **tx)
     .await
     .map_err(|e| {
-        error!("resolution proposal update error: {}", e);
+        error!("resolution proposal insert error: {}", e);
         shared::Error::Sqlx(e)
     })?;
+
+    sqlx::query("UPDATE markets SET state = 'proposed', updated_at = now() WHERE market_id = $1")
+        .bind(market_id_bytes)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            error!("market state update error: {}", e);
+            shared::Error::Sqlx(e)
+        })?;
 
     Ok(true)
 }
@@ -164,7 +145,7 @@ pub async fn handle_outcome_disputed(
     sqlx::query(
         "UPDATE resolution_proposals
          SET status = 'disputed', disputer_address = $2, dispute_reason = $3, updated_at = now()
-         WHERE market_id = $1",
+         WHERE market_id = $1 AND round = 0",
     )
     .bind(market_id_bytes)
     .bind(disputer_addr)
@@ -175,6 +156,15 @@ pub async fn handle_outcome_disputed(
         error!("resolution proposal update error: {}", e);
         shared::Error::Sqlx(e)
     })?;
+
+    sqlx::query("UPDATE markets SET state = 'disputed', updated_at = now() WHERE market_id = $1")
+        .bind(market_id_bytes)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            error!("market state update error: {}", e);
+            shared::Error::Sqlx(e)
+        })?;
 
     Ok(true)
 }
@@ -190,6 +180,12 @@ pub async fn handle_outcome_resolved(
     };
     let market_id_bytes = market_id.as_slice();
 
+    let payouts = match parse_u256_array(&log.data().data) {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    let payouts_json = serde_json::to_value(&payouts).unwrap_or(serde_json::Value::Null);
+
     sqlx::query(
         "UPDATE markets SET state = 'resolved', updated_at = now()
          WHERE market_id = $1",
@@ -203,10 +199,11 @@ pub async fn handle_outcome_resolved(
     })?;
 
     sqlx::query(
-        "UPDATE resolution_proposals SET status = 'resolved', finalized_at = now(), updated_at = now()
-         WHERE market_id = $1",
+        "UPDATE resolution_proposals SET status = 'resolved', proposed_payouts = $2, finalized_at = now(), updated_at = now()
+         WHERE market_id = $1 AND round = 0",
     )
     .bind(market_id_bytes)
+    .bind(payouts_json)
     .execute(&mut **tx)
     .await
     .map_err(|e| {
@@ -246,7 +243,7 @@ pub async fn handle_dispute_resolved(
     sqlx::query(
         "UPDATE resolution_proposals
          SET status = 'resolved', proposed_payouts = $2, finalized_at = now(), updated_at = now()
-         WHERE market_id = $1",
+         WHERE market_id = $1 AND round = 0",
     )
     .bind(market_id_bytes)
     .bind(payouts_json)

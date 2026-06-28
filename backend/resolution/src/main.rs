@@ -266,9 +266,9 @@ async fn expiry_watcher(pool: PgPool, ai: &AiResolver) {
                     let commitment = compute_commitment(&market_id, &p.payouts);
                     let _ = sqlx::query(
                         "INSERT INTO resolution_proposals
-                         (market_id, resolver_id, commitment, proposed_payouts, confidence, evidence, status, created_at, updated_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, 'pending', now(), now())
-                         ON CONFLICT (market_id) DO UPDATE SET
+                         (market_id, round, resolver_id, commitment, proposed_payouts, confidence, evidence, status, created_at, updated_at)
+                         VALUES ($1, 0, $2, $3, $4, $5, $6, 'pending', now(), now())
+                         ON CONFLICT (market_id, round) DO UPDATE SET
                          commitment = EXCLUDED.commitment,
                          proposed_payouts = EXCLUDED.proposed_payouts,
                          confidence = EXCLUDED.confidence,
@@ -289,9 +289,9 @@ async fn expiry_watcher(pool: PgPool, ai: &AiResolver) {
                     warn!("resolution fallback for {}: {}", market_id, e);
                     let _ = sqlx::query(
                         "INSERT INTO resolution_proposals
-                         (market_id, resolver_id, status, created_at, updated_at)
-                         VALUES ($1, $2, 'pending', now(), now())
-                         ON CONFLICT (market_id) DO NOTHING",
+                         (market_id, round, resolver_id, status, created_at, updated_at)
+                         VALUES ($1, 0, $2, 'pending', now(), now())
+                         ON CONFLICT (market_id, round) DO NOTHING",
                     )
                     .bind(&market_id_bytes[..])
                     .bind(&resolver_id)
@@ -307,11 +307,13 @@ async fn expiry_watcher(pool: PgPool, ai: &AiResolver) {
     }
 }
 
-// NOTE: On-chain commit/reveal is deferred. The AI produces a `pending` proposal +
-// commitment here; the real lifecycle (committed -> revealed -> disputed -> resolved)
-// is driven by on-chain Oracle events that the indexer reconciles into
-// `resolution_proposals`. The on-chain submission (alloy tx -> Oracle.commitOutcome/
-// revealOutcome) is the documented post-MVP seam and is intentionally NOT faked here.
+// NOTE: On-chain submission is deferred. The AI produces a `pending` proposal here;
+// the real lifecycle (proposed -> disputed -> resolved) is driven by on-chain Oracle
+// events that the indexer reconciles into `resolution_proposals`. For the MVP the
+// Oracle uses plaintext optimistic resolution (no commit-reveal), so the on-chain
+// submission (alloy tx -> Oracle.proposeOutcome) is the documented post-MVP seam and is
+// intentionally NOT faked here. The `commitment` stored below is an off-chain integrity
+// hash of the proposed payouts, not an on-chain commit-reveal commitment.
 
 fn compute_commitment(market_id: &MarketId, payouts: &[u64]) -> B256 {
     let mut data = Vec::new();
