@@ -25,15 +25,12 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
     uint256 public makerRebateBps;
 
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(bytes32 salt,address maker,address signer,bytes32 conditionId,bytes32 parentCollectionId,uint256 positionId,uint256 price,uint256 amount,uint8 side,uint256 nonce,uint256 deadline)"
+        "Order(bytes32 salt,address maker,uint256 positionId,uint256 price,uint256 amount,uint8 side,uint256 nonce,uint256 deadline)"
     );
 
     struct Order {
         bytes32 salt;
         address maker;
-        address signer;
-        bytes32 conditionId;
-        bytes32 parentCollectionId;
         uint256 positionId;
         uint256 price;
         uint256 amount;
@@ -47,48 +44,25 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         bytes signature;
     }
 
-    struct CtfDelta {
-        address account;
-        uint256 positionId;
-        int256 amount;
-    }
-
-    struct SplitMergeInstruction {
-        uint8 action;
-        bytes32 conditionId;
-        bytes32 parentCollectionId;
-        uint256[] partition;
-        uint256 amount;
-    }
-
     mapping(bytes32 => uint256) public filledAmount;
     /// @notice Per-maker cancellation epoch. An order is valid only while o.nonce == nonces[maker].
     ///         Bumping it via cancelAllOrders() mass-invalidates every outstanding signed order.
     ///         It is NOT incremented per fill (per-fill replay is bounded by filledAmount[orderHash]),
     ///         which is what allows resting orders to be partially filled across multiple batches.
     mapping(address => uint256) public nonces;
-    /// @notice maker => delegated signer authorization (session keys). Empty => only maker may sign.
-    mapping(address => mapping(address => bool)) public approvedSigner;
     mapping(bytes32 => bool) private _settledBatches;
 
-    mapping(address => int256) private _expectedUsdc;
-    mapping(address => mapping(uint256 => int256)) private _expectedCtf;
-    address[] private _touchedAccounts;
-    uint256[] private _touchedPositions;
-
     error InvalidSignature();
-    error UnauthorizedSigner(address maker, address signer);
     error OrderExpired();
     error InvalidNonce();
     error Overfill(uint256 requested, uint256 available);
-    error MathNotJustifiedUsdc(address account, int256 expected);
-    error MathNotJustifiedCtf(address account, uint256 positionId, int256 expected);
     error LengthMismatch();
     error BatchAlreadySettled(bytes32 batchId);
     error InvalidFee();
+    error ExchangeUsdcNetNegative(int256 net);
+    error CtfNotConserved(uint256 positionId, int256 net);
 
     event NonceInvalidated(address indexed maker, uint256 newNonce);
-    event SignerApprovalSet(address indexed maker, address indexed signer, bool approved);
     event FeeRatesUpdated(uint256 takerFeeBps, uint256 makerRebateBps);
 
     constructor(address _custody, address _ctf, address _usdc) EIP712("Omniscient Exchange", "1") {
@@ -114,7 +88,9 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
     }
 
     function withdrawFees(uint256 amount, address to, uint256 deadline, bytes calldata sig) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        custody.withdraw(amount, to, deadline, sig);
+        // Custody only ever pays out to the caller (this exchange); forward fees to the treasury.
+        custody.withdraw(amount, deadline, sig);
+        usdc.safeTransfer(to, amount);
     }
 
     /// @notice Mass-cancel all of the caller's outstanding signed orders by bumping their epoch.
@@ -123,257 +99,167 @@ contract SettlementExchange is AccessControl, Pausable, ReentrancyGuard, EIP712 
         emit NonceInvalidated(msg.sender, next);
     }
 
-    /// @notice Authorize/revoke a delegated signer (session key) that may sign orders for msg.sender.
-    function setApprovedSigner(address signer, bool approved) external {
-        approvedSigner[msg.sender][signer] = approved;
-        emit SignerApprovalSet(msg.sender, signer, approved);
-    }
-
+    /// @notice Settle a batch of matched orders. All USDC/CTF movement is derived ON-CHAIN from
+    ///         the makers' EIP-712 signatures — the operator supplies no deltas, so it can move
+    ///         nothing the signatures don't justify. Two invariants replace any trust in the
+    ///         operator: the exchange's net USDC must be >= 0 (rebates funded strictly by taker
+    ///         fees; pool never pays out), and the exchange's net CTF per position must be 0
+    ///         (pure passthrough; mismatched fills cannot drain or strand inventory).
     function settleBatch(
         bytes32 batchId,
         SignedOrder[] calldata orders,
         uint256[] calldata fills,
-        bool[] calldata isMaker,
-        ICustody.BalanceDelta[] calldata usdcDeltas,
-        CtfDelta[] calldata ctfDeltas,
-        SplitMergeInstruction[] calldata instructions,
-        bytes calldata custodyWithdrawSig,
-        uint256 custodyWithdrawDeadline
+        bool[] calldata isMaker
     ) external onlyRole(OPERATOR_ROLE) nonReentrant whenNotPaused {
         if (_settledBatches[batchId]) revert BatchAlreadySettled(batchId);
         _settledBatches[batchId] = true;
 
         if (orders.length != fills.length || orders.length != isMaker.length) revert LengthMismatch();
 
-        _processOrders(orders, fills, isMaker);
-        _processInstructions(instructions);
-        _verifyAndClearExpectations(usdcDeltas, ctfDeltas);
+        // Aggregated per-account USDC deltas (+1 slot for the exchange's fee leg).
+        ICustody.BalanceDelta[] memory deltas = new ICustody.BalanceDelta[](orders.length + 1);
+        uint256 deltaCount;
+        int256 exchangeUsdcNet;
 
-        custody.applyNetDeltas(batchId, usdcDeltas);
-        // Ordering matters: pull user CTF in first (funds merges + redistribution), then run
-        // splits/merges (which may mint the CTF needed for outbound), then push CTF out to users.
-        _pullInboundCtf(ctfDeltas);
-        _executeSplitsAndMerges(instructions, custodyWithdrawSig, custodyWithdrawDeadline);
-        _pushOutboundCtf(ctfDeltas);
-    }
-
-    function _processOrders(SignedOrder[] calldata orders, uint256[] calldata fills, bool[] calldata isMaker) private {
         for (uint256 i = 0; i < orders.length; i++) {
             uint256 fill = fills[i];
             if (fill == 0) continue;
-            Order memory o = orders[i].order;
+            Order calldata o = orders[i].order;
 
-            bytes32 orderHash = _hashTypedDataV4(
-                keccak256(
-                    abi.encode(
-                        ORDER_TYPEHASH,
-                        o.salt,
-                        o.maker,
-                        o.signer,
-                        o.conditionId,
-                        o.parentCollectionId,
-                        o.positionId,
-                        o.price,
-                        o.amount,
-                        o.side,
-                        o.nonce,
-                        o.deadline
-                    )
-                )
-            );
-
+            bytes32 orderHash = _hashOrder(o);
             if (block.timestamp > o.deadline) revert OrderExpired();
             // Cancellation-epoch check keyed by the funds owner (maker), NOT incremented per fill,
             // so resting orders can be partially filled across batches via filledAmount below.
             if (o.nonce != nonces[o.maker]) revert InvalidNonce();
-
-            address recovered = ECDSA.recover(orderHash, orders[i].signature);
-            if (recovered != o.signer) revert InvalidSignature();
-            // Bind signer to maker: only the maker or a maker-approved delegate may move maker funds.
-            if (o.signer != o.maker && !approvedSigner[o.maker][o.signer]) {
-                revert UnauthorizedSigner(o.maker, o.signer);
-            }
+            // Only the maker may move maker funds: signature must recover to the maker itself.
+            if (ECDSA.recover(orderHash, orders[i].signature) != o.maker) revert InvalidSignature();
 
             uint256 filled = filledAmount[orderHash];
             if (filled + fill > o.amount) revert Overfill(filled + fill, o.amount - filled);
             filledAmount[orderHash] = filled + fill;
 
-            int256 volume;
-            if (o.side == 0) {
-                volume = int256((fill * o.price + 999999) / 1e6);
-            } else {
-                volume = int256((fill * o.price) / 1e6);
-            }
+            // Buy volume rounds UP, sell rounds DOWN — always favors the pool.
+            int256 volume = o.side == 0
+                ? int256((fill * o.price + 999999) / 1e6)
+                : int256((fill * o.price) / 1e6);
 
-            int256 fee;
-            if (isMaker[i]) {
-                int256 rebate = (volume * int256(makerRebateBps)) / 10000;
-                fee = -rebate;
-            } else {
-                fee = (volume * int256(takerFeeBps) + 9999) / 10000;
-            }
-
-            _touchAccount(o.maker);
-            _touchAccount(address(this));
-            _touchPosition(o.positionId);
-
-            int256 ctfAmount = int256(fill);
+            // Taker fee rounds UP (favors pool); maker rebate rounds DOWN and is a negative fee.
+            int256 fee = isMaker[i]
+                ? -((volume * int256(makerRebateBps)) / 10000)
+                : (volume * int256(takerFeeBps) + 9999) / 10000;
 
             if (o.side == 0) {
-                _expectedUsdc[o.maker] -= (volume + fee);
-                _expectedCtf[o.maker][o.positionId] += ctfAmount;
-                _expectedUsdc[address(this)] += (volume + fee);
-                _expectedCtf[address(this)][o.positionId] -= ctfAmount;
+                // Buy: maker pays volume+fee; the exchange receives it.
+                deltaCount = _accrue(deltas, deltaCount, o.maker, -(volume + fee));
+                exchangeUsdcNet += (volume + fee);
             } else {
-                _expectedUsdc[o.maker] += (volume - fee);
-                _expectedCtf[o.maker][o.positionId] -= ctfAmount;
-                _expectedUsdc[address(this)] -= (volume - fee);
-                _expectedCtf[address(this)][o.positionId] += ctfAmount;
+                // Sell: maker receives volume-fee; the exchange pays it.
+                deltaCount = _accrue(deltas, deltaCount, o.maker, volume - fee);
+                exchangeUsdcNet -= (volume - fee);
             }
+        }
+
+        // Invariant: net protocol fee >= 0 — the pool can never pay out USDC on net.
+        if (exchangeUsdcNet < 0) revert ExchangeUsdcNetNegative(exchangeUsdcNet);
+
+        // Append the exchange's balancing leg so the delta set conserves (sum == 0).
+        deltas[deltaCount] = ICustody.BalanceDelta({ account: address(this), amount: exchangeUsdcNet });
+        deltaCount++;
+
+        custody.applyNetDeltas(batchId, _trim(deltas, deltaCount));
+
+        _settleCtf(orders, fills);
+    }
+
+    /// @dev Accrue `amount` into the in-memory delta for `account`, aggregating duplicates so a
+    ///      maker with several orders in the batch yields a single net entry (avoids transient
+    ///      debit-before-credit underflow when Custody applies them in order).
+    function _accrue(
+        ICustody.BalanceDelta[] memory deltas,
+        uint256 count,
+        address account,
+        int256 amount
+    ) private pure returns (uint256) {
+        for (uint256 i = 0; i < count; i++) {
+            if (deltas[i].account == account) {
+                deltas[i].amount += amount;
+                return count;
+            }
+        }
+        deltas[count] = ICustody.BalanceDelta({ account: account, amount: amount });
+        return count + 1;
+    }
+
+    function _trim(ICustody.BalanceDelta[] memory deltas, uint256 count)
+        private
+        pure
+        returns (ICustody.BalanceDelta[] memory out)
+    {
+        out = new ICustody.BalanceDelta[](count);
+        for (uint256 i = 0; i < count; i++) {
+            out[i] = deltas[i];
         }
     }
 
-    function _processInstructions(SplitMergeInstruction[] calldata instructions) private {
-        for (uint256 i = 0; i < instructions.length; i++) {
-            SplitMergeInstruction memory inst = instructions[i];
-            _touchAccount(address(this));
-
-            if (inst.action == 0) {
-                _expectedUsdc[address(this)] -= int256(inst.amount);
-                for (uint256 j = 0; j < inst.partition.length; j++) {
-                    bytes32 collId =
-                        ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
-                    uint256 posId = ctf.getPositionId(address(usdc), collId);
-                    _touchPosition(posId);
-                    _expectedCtf[address(this)][posId] += int256(inst.amount);
+    /// @dev Move outcome shares strictly between makers via the exchange. The exchange's net per
+    ///      position must be zero (verified first), then sells are pulled in before buys are
+    ///      pushed out so the exchange never needs pre-existing inventory.
+    function _settleCtf(SignedOrder[] calldata orders, uint256[] calldata fills) private {
+        // Verify per-position conservation: exchange is a pure passthrough (net == 0).
+        uint256[] memory positions = new uint256[](orders.length);
+        int256[] memory nets = new int256[](orders.length);
+        uint256 pCount;
+        for (uint256 i = 0; i < orders.length; i++) {
+            uint256 fill = fills[i];
+            if (fill == 0) continue;
+            Order calldata o = orders[i].order;
+            // Sells flow CTF in (+), buys flow CTF out (-) of the exchange.
+            int256 delta = o.side == 1 ? int256(fill) : -int256(fill);
+            bool found;
+            for (uint256 j = 0; j < pCount; j++) {
+                if (positions[j] == o.positionId) {
+                    nets[j] += delta;
+                    found = true;
+                    break;
                 }
-            } else {
-                _expectedUsdc[address(this)] += int256(inst.amount);
-                for (uint256 j = 0; j < inst.partition.length; j++) {
-                    bytes32 collId =
-                        ctf.getCollectionId(inst.parentCollectionId, inst.conditionId, inst.partition[j]);
-                    uint256 posId = ctf.getPositionId(address(usdc), collId);
-                    _touchPosition(posId);
-                    _expectedCtf[address(this)][posId] -= int256(inst.amount);
-                }
+            }
+            if (!found) {
+                positions[pCount] = o.positionId;
+                nets[pCount] = delta;
+                pCount++;
+            }
+        }
+        for (uint256 j = 0; j < pCount; j++) {
+            if (nets[j] != 0) revert CtfNotConserved(positions[j], nets[j]);
+        }
+
+        // Pull sells in first (funds the outbound), then push buys out.
+        for (uint256 i = 0; i < orders.length; i++) {
+            uint256 fill = fills[i];
+            if (fill == 0) continue;
+            Order calldata o = orders[i].order;
+            if (o.side == 1) {
+                ctf.safeTransferFrom(o.maker, address(this), o.positionId, fill, "");
+            }
+        }
+        for (uint256 i = 0; i < orders.length; i++) {
+            uint256 fill = fills[i];
+            if (fill == 0) continue;
+            Order calldata o = orders[i].order;
+            if (o.side == 0) {
+                ctf.safeTransferFrom(address(this), o.maker, o.positionId, fill, "");
             }
         }
     }
 
-    function _verifyAndClearExpectations(
-        ICustody.BalanceDelta[] calldata usdcDeltas,
-        CtfDelta[] calldata ctfDeltas
-    ) private {
-        // Every account/position referenced by the deltas MUST be verified and cleared.
-        // Touch them up front: deltas pointing at accounts/positions not already touched by an
-        // order or instruction would otherwise skip the justification check below (and leak
-        // non-zero expectation state into future batches), letting the operator settle moves
-        // that no signed order backs.
-        for (uint256 i = 0; i < usdcDeltas.length; i++) {
-            _touchAccount(usdcDeltas[i].account);
-            _expectedUsdc[usdcDeltas[i].account] -= usdcDeltas[i].amount;
-        }
-        for (uint256 i = 0; i < ctfDeltas.length; i++) {
-            _touchAccount(ctfDeltas[i].account);
-            _touchPosition(ctfDeltas[i].positionId);
-            _expectedCtf[ctfDeltas[i].account][ctfDeltas[i].positionId] -= ctfDeltas[i].amount;
-        }
-
-        for (uint256 i = 0; i < _touchedAccounts.length; i++) {
-            address acc = _touchedAccounts[i];
-            if (acc != address(this) && _expectedUsdc[acc] != 0) {
-                revert MathNotJustifiedUsdc(acc, _expectedUsdc[acc]);
-            }
-            delete _expectedUsdc[acc];
-            for (uint256 j = 0; j < _touchedPositions.length; j++) {
-                uint256 posId = _touchedPositions[j];
-                if (_expectedCtf[acc][posId] != 0) {
-                    revert MathNotJustifiedCtf(acc, posId, _expectedCtf[acc][posId]);
-                }
-                delete _expectedCtf[acc][posId];
-            }
-        }
-        delete _touchedAccounts;
-        delete _touchedPositions;
-    }
-
-    function _pullInboundCtf(CtfDelta[] calldata ctfDeltas) private {
-        for (uint256 i = 0; i < ctfDeltas.length; i++) {
-            if (ctfDeltas[i].account == address(this)) continue;
-            int256 amt = ctfDeltas[i].amount;
-            if (amt < 0) {
-                ctf.safeTransferFrom(
-                    ctfDeltas[i].account, address(this), ctfDeltas[i].positionId, uint256(-amt), ""
-                );
-            }
-        }
-    }
-
-    function _pushOutboundCtf(CtfDelta[] calldata ctfDeltas) private {
-        for (uint256 i = 0; i < ctfDeltas.length; i++) {
-            if (ctfDeltas[i].account == address(this)) continue;
-            int256 amt = ctfDeltas[i].amount;
-            if (amt > 0) {
-                ctf.safeTransferFrom(
-                    address(this), ctfDeltas[i].account, ctfDeltas[i].positionId, uint256(amt), ""
-                );
-            }
-        }
-    }
-
-    function _executeSplitsAndMerges(
-        SplitMergeInstruction[] calldata instructions,
-        bytes calldata sig,
-        uint256 deadline
-    ) private {
-        uint256 splits = 0;
-        uint256 merges = 0;
-        for (uint256 i = 0; i < instructions.length; i++) {
-            if (instructions[i].action == 0) splits += instructions[i].amount;
-            else merges += instructions[i].amount;
-        }
-
-        if (splits > merges) {
-            uint256 netWithdraw = splits - merges;
-            custody.withdraw(netWithdraw, address(this), deadline, sig);
-        }
-
-        if (splits > 0) {
-            usdc.forceApprove(address(ctf), splits);
-        }
-
-        for (uint256 i = 0; i < instructions.length; i++) {
-            SplitMergeInstruction memory inst = instructions[i];
-            if (inst.action == 0) {
-                ctf.splitPosition(
-                    address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount
-                );
-            } else {
-                ctf.mergePositions(
-                    address(usdc), inst.parentCollectionId, inst.conditionId, inst.partition, inst.amount
-                );
-            }
-        }
-
-        if (merges > splits) {
-            uint256 netDeposit = merges - splits;
-            usdc.forceApprove(address(custody), netDeposit);
-            custody.deposit(netDeposit);
-        }
-    }
-
-    function _touchAccount(address acc) private {
-        for (uint256 i = 0; i < _touchedAccounts.length; i++) {
-            if (_touchedAccounts[i] == acc) return;
-        }
-        _touchedAccounts.push(acc);
-    }
-
-    function _touchPosition(uint256 pos) private {
-        for (uint256 i = 0; i < _touchedPositions.length; i++) {
-            if (_touchedPositions[i] == pos) return;
-        }
-        _touchedPositions.push(pos);
+    function _hashOrder(Order calldata o) private view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    ORDER_TYPEHASH, o.salt, o.maker, o.positionId, o.price, o.amount, o.side, o.nonce, o.deadline
+                )
+            )
+        );
     }
 
     function onERC1155Received(address, address, uint256, uint256, bytes calldata)
